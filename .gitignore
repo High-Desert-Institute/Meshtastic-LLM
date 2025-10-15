@@ -215,3 +215,8 @@ prompts/*.tmp
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+*.csv
+*.sqlite3
+*.db
