@@ -1,0 +1,3 @@
+[submodule "submodules/meshtastic"]
+	path = submodules/meshtastic
+	url = https://github.com/meshtastic/python/

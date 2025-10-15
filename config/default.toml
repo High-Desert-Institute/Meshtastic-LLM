@@ -1,0 +1,29 @@
+# Meshtastic-LLM default configuration
+
+[data]
+root = "data"
+nodes_base = "data/nodes"
+prompts = "prompts"
+logs = "logs"
+
+[meshtastic]
+bridge_poll_interval_ms = 500
+
+[ai]
+ai_poll_interval_ms = 1000
+max_message_chars = 200
+max_context_chars = 2000
+reply_cooldown_seconds = 120
+enable_prompt_logs = true
+
+[ollama]
+base_url = "http://localhost:11434"
+model_instruct = "qwen3-4b-q8-instruct"
+model_think = "qwen3-4b-q8-thinking"
+
+[general]
+node_uid_strategy = "auto"
+timezone = "UTC"
+
+[env]
+prefix = "MESHTASTIC_LLM_"
