@@ -3,6 +3,22 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+ensure_python_dep() {
+	local package="$1"
+	if ! python3 - "$package" <<'PY'
+import importlib
+import sys
+
+package = sys.argv[1]
+sys.exit(0 if importlib.util.find_spec(package) else 1)
+PY
+	then
+		python3 -m pip install --upgrade "$package"
+	fi
+}
+
+ensure_python_dep "meshtastic"
+
 # Run Ollama container if it is not already up
 if ! docker ps --format '{{.Names}}' | grep -q '^ollama$'; then
 	docker run -d -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama
