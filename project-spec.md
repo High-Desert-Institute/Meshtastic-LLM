@@ -178,6 +178,8 @@ Use a small config file (YAML or TOML) and/or environment variables. Suggested k
 - Key events: node seen/updated, message received, message queued, send succeeded/failed, sighting stored/skipped, AI inference started/completed/skipped
 - Optional lightweight metrics: counters for inbound/outbound, deduped messages, reply counts, failures
 - Prompt audit trail: prompts.csv and per-prompt Markdown capture model, runtime, and tokenization metrics for diagnostics and demonstrations
+- Every CLI invocation writes a new timestamped log file under logs/log.YYYY-MM-DD-HH-MM-SS-ffffff.txt capturing CLI arguments, config overrides, and notable events
+- A `--status` CLI flag prints queued message counts, last-seen peers, and the most recent log file to support quick diagnostics
 
 ### Security and privacy
 - Everything is local; no cloud calls expected
@@ -189,6 +191,7 @@ Use a small config file (YAML or TOML) and/or environment variables. Suggested k
 - Unit tests for CSV helpers, filename sanitization, dedupe logic (sightings), trigger detection (DM vs librarian)
 - Integration tests with a Meshtastic mock and an Ollama stub server
 - Golden-file tests for prompt assembly and reply splitting
+- A `--test` CLI flag runs the bridge against a stubbed Meshtastic interface using temporary directories so automated agents can exercise the workflow without modifying real data
 
 ### Deliverables and acceptance criteria
 - Two runnable Python scripts with minimal config and no external DB dependencies
@@ -549,7 +552,7 @@ Legend:
   - [x] Run supervision scripts (e.g., `run.sh`) to start/restart both services with logging
   - [ ] Optional Dockerfiles or packaging for the two Python services
 - [ ] **Documentation and rollout**
-  - [ ] README updates for setup, configuration, troubleshooting, and CSV schemas
+  - [?] README updates for setup, configuration, troubleshooting, and CSV schemas (initial pass completed; expand troubleshooting)
   - [ ] Prompts/data workflow documentation for operators and Jekyll consumers
   - [ ] Field dry-run with log review and tuning of message limits/cooldowns
   - [ ] Final polish: channel/DM allow/block lists and safety/call refusal patterns

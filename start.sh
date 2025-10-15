@@ -3,21 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ensure_python_dep() {
-	local package="$1"
-	if ! python3 - "$package" <<'PY'
-import importlib
-import sys
-
-package = sys.argv[1]
-sys.exit(0 if importlib.util.find_spec(package) else 1)
-PY
-	then
-		python3 -m pip install --upgrade "$package"
-	fi
-}
-
-ensure_python_dep "meshtastic"
+if [ -f "${ROOT_DIR}/requirements.txt" ]; then
+	python3 -m pip install --upgrade -r "${ROOT_DIR}/requirements.txt"
+fi
 
 # Run Ollama container if it is not already up
 if ! docker ps --format '{{.Names}}' | grep -q '^ollama$'; then
@@ -30,4 +18,5 @@ if ! docker ps --format '{{.Names}}' | grep -q '^open-webui$'; then
 fi
 
 # Launch the Meshtastic bridge for local testing
+python -m pip install --upgrade -r requirements.txt
 exec python3 "${ROOT_DIR}/meshtastic-bridge.py" --config "${ROOT_DIR}/config/default.toml"
