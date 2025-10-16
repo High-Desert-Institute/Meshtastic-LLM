@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 try:
+    from serial.serialutil import SerialException
+    from serial.tools import list_ports
+except ModuleNotFoundError:  # pragma: no cover
+    SerialException = Exception  # type: ignore[assignment]
+    list_ports = None  # type: ignore[assignment]
+
+try:
     import tomllib  # Python 3.11+
 except ModuleNotFoundError as exc:  # pragma: no cover
     raise RuntimeError("Python 3.11 or newer is required to run this script") from exc
@@ -25,6 +32,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 try:
     from meshtastic import portnums_pb2 as portnums
     from meshtastic.serial_interface import SerialInterface
+    from meshtastic.mesh_interface import MeshInterface
 except ModuleNotFoundError as exc:  # pragma: no cover
     raise RuntimeError("The meshtastic python package is required: pip install meshtastic") from exc
 
@@ -170,9 +178,11 @@ class CSVStore:
 
     def append_row(self, path: Path, headers: Iterable[str], row: Dict[str, Any]) -> None:
         headers_list = list(headers)
-        existing = self.read_rows(path)
-        existing.append({key: row.get(key, "") for key in headers_list})
-        self.write_rows(path, headers_list, existing)
+        self.ensure_file(path, headers_list)
+        with FileLock(path):
+            with path.open("a", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers_list)
+                writer.writerow({key: row.get(key, "") for key in headers_list})
 
 
 def load_config(path: Path, env_prefix: str = DEFAULT_ENV_PREFIX) -> BridgeConfig:
@@ -275,6 +285,9 @@ class MeshtasticBridge:
         self._interface = None
         self._node_paths = None
         self._subscriptions = []
+        self._cached_ports: List[str] = []
+        self._cached_ports_timestamp: float = 0.0
+        self._initial_port_scan_done = False
 
     def _configure_logging(self) -> None:
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -308,7 +321,9 @@ class MeshtasticBridge:
 
     def start(self) -> None:
         self._logger.info("Starting meshtastic bridge")
-        self._connect_interface()
+        if not self._connect_interface():
+            self._logger.info("Start aborted before Meshtastic interface became available")
+            return
         self._ensure_node_paths()
         self._register_listeners()
 
@@ -325,6 +340,8 @@ class MeshtasticBridge:
 
     def run(self) -> None:
         self.start()
+        if self._interface is None:
+            return
         try:
             while not self._stop_event.is_set():
                 self._flush_outbound_queue()
@@ -334,18 +351,89 @@ class MeshtasticBridge:
         finally:
             self.stop()
 
-    def _connect_interface(self) -> None:
+    def _available_ports(self) -> List[str]:
+        if list_ports is None:
+            return []
+        now = time.time()
+        if (now - self._cached_ports_timestamp) < 60.0 and self._cached_ports:
+            return list(self._cached_ports)
+        try:
+            ports = sorted(port.device for port in list_ports.comports())
+            self._cached_ports = ports
+            self._cached_ports_timestamp = now
+            self._initial_port_scan_done = True
+            return ports
+        except Exception as exc:  # pragma: no cover
+            self._logger.debug("Failed to enumerate serial ports: %s", exc)
+            return list(self._cached_ports)
+
+    def _connect_interface(self) -> bool:
         if self._interface_factory is not None:
             self._interface = self._interface_factory()
             self._logger.info(
                 "Connected using injected Meshtastic interface %s", type(self._interface).__name__
             )
-            return
+            return True
         kwargs = {}
         if self.config.serial_port:
             kwargs["devPath"] = self.config.serial_port
-        self._interface = SerialInterface(**kwargs)
-        self._logger.info("Connected to Meshtastic device")
+        backoff_seconds = 5.0
+        attempt = 0
+        last_warning_message: Optional[str] = None
+        last_warning_timestamp = 0.0
+
+        def _log_wait(message: str, include_ports: bool = True) -> None:
+            nonlocal last_warning_message, last_warning_timestamp
+            now = time.time()
+            if message != last_warning_message or (now - last_warning_timestamp) >= 60.0:
+                if include_ports:
+                    self._logger.warning(message)
+                    available = self._available_ports()
+                    if available:
+                        self._logger.warning("Detected serial ports: %s", ", ".join(available))
+                    self._logger.warning(
+                        "Waiting for Meshtastic device. Ensure the radio is plugged in and no other tools are using it."
+                    )
+                else:
+                    self._logger.debug(message)
+                last_warning_message = message
+                last_warning_timestamp = now
+            else:
+                self._logger.debug(message)
+
+        while not self._stop_event.is_set():
+            attempt += 1
+            port_label = self.config.serial_port or "auto-detect"
+            if attempt == 1:
+                self._logger.info("Attempting to open Meshtastic interface (port=%s)", port_label)
+            else:
+                self._logger.info(
+                    "Retrying Meshtastic interface connection (attempt %s, port=%s)",
+                    attempt,
+                    port_label,
+                )
+            try:
+                self._interface = SerialInterface(**kwargs)
+                self._logger.info("Connected to Meshtastic device")
+                last_warning_message = None
+                return True
+            except SerialException as exc:  # type: ignore[arg-type]
+                _log_wait(
+                    f"Meshtastic serial port unavailable ({port_label}): {exc}",
+                    include_ports=not self._initial_port_scan_done,
+                )
+            except MeshInterface.MeshInterfaceError as exc:
+                _log_wait(
+                    f"Meshtastic handshake timed out ({port_label}): {exc}", include_ports=False
+                )
+            except Exception as exc:
+                message = f"Unexpected error while connecting to Meshtastic device ({port_label}): {exc}"
+                _log_wait(message, include_ports=not self._initial_port_scan_done)
+                self._logger.debug("Full exception details", exc_info=exc)
+            if self._stop_event.wait(backoff_seconds):
+                break
+            backoff_seconds = min(backoff_seconds * 1.5, 60.0)
+        return False
 
     def _resolve_node_uid(self) -> str:
         if self.config.node_uid_override:
@@ -354,35 +442,81 @@ class MeshtasticBridge:
         if strategy == "config":
             raise RuntimeError("node_uid_strategy=config requires general.node_uid to be set")
         assert self._interface is not None
-        try:
-            info = self._interface.getMyNodeInfo()
-            if not info:
-                wait_for_config = getattr(self._interface, "waitForConfig", None)
-                if callable(wait_for_config):
-                    self._logger.info("Waiting for node identity from Meshtastic interface")
-                    try:
-                        wait_for_config()
-                    except Exception as waited_exc:  # pragma: no cover
-                        self._logger.warning("waitForConfig failed: %s", waited_exc)
-                    info = self._interface.getMyNodeInfo()
-            if info:
-                for key in ("userId", "nodeId", "longName", "shortName"):
-                    value = info.get(key)
-                    if value:
-                        return sanitize_name(str(value))
-                user_info = info.get("user")
-                if isinstance(user_info, dict):
-                    for key in ("id", "longName", "shortName", "userId"):
-                        value = user_info.get(key)
-                        if value:
-                            return sanitize_name(str(value))
-                self._logger.warning(
-                    "Meshtastic node info missing expected identity keys: %s",
-                    sorted(info.keys()),
-                )
-        except Exception as exc:
-            self._logger.warning("Could not resolve node uid from interface: %s", exc)
+        deadline = time.time() + 10.0
+        last_snapshot: Optional[str] = None
+        # The waitForConfig method is not consistently available or stable.
+        # Instead, we will poll for the node info directly.
+        # try:
+        #     wait_for_config = getattr(self._interface, "waitForConfig", None)
+        #     if callable(wait_for_config):
+        #         wait_for_config()
+        # except Exception as exc:  # pragma: no cover
+        #     self._logger.warning("waitForConfig raised while resolving node uid: %s", exc)
+        while time.time() < deadline:
+            try:
+                info = self._interface.getMyNodeInfo()
+            except Exception as exc:  # pragma: no cover
+                self._logger.debug("getMyNodeInfo raised: %s", exc)
+                info = None
+            candidate = self._candidate_uid_from_info(info)
+            if candidate:
+                return candidate
+            nodes = getattr(self._interface, "nodesByNum", None)
+            my_info = getattr(self._interface, "myInfo", None)
+            node_num = getattr(my_info, "my_node_num", None)
+            if nodes and node_num is not None:
+                node_entry = nodes.get(node_num)
+                candidate = self._candidate_uid_from_info(node_entry)
+                if candidate:
+                    return candidate
+                if node_entry is not None:
+                    last_snapshot = self._safe_repr(node_entry)
+            if info is not None:
+                last_snapshot = self._safe_repr(info)
+            time.sleep(0.5)
+        if last_snapshot:
+            self._logger.warning(
+                "Unable to resolve node UID after waiting; falling back to 'node'. Last snapshot=%s",
+                last_snapshot,
+            )
+        else:
+            self._logger.warning("Unable to resolve node UID; falling back to 'node'.")
         return "node"
+
+    def _candidate_uid_from_info(self, info: Any) -> Optional[str]:
+        if info is None:
+            return None
+        def _pull(container: Any, key: str) -> Optional[str]:
+            if isinstance(container, dict):
+                value = container.get(key)
+            else:
+                value = getattr(container, key, None)
+            if value:
+                return sanitize_name(str(value))
+            return None
+
+        for key in ("userId", "nodeId", "id", "longName", "shortName"):
+            direct = _pull(info, key)
+            if direct:
+                return direct
+        user = None
+        if isinstance(info, dict):
+            user = info.get("user")
+        else:
+            user = getattr(info, "user", None)
+        if user is not None:
+            for key in ("id", "userId", "longName", "shortName"):
+                nested = _pull(user, key)
+                if nested:
+                    return nested
+        return None
+
+    @staticmethod
+    def _safe_repr(value: Any, limit: int = 512) -> str:
+        text = repr(value)
+        if len(text) > limit:
+            return text[: limit - 3] + "..."
+        return text
 
     def _ensure_node_paths(self) -> None:
         node_uid = self._resolve_node_uid()
@@ -421,6 +555,13 @@ class MeshtasticBridge:
         pub.subscribe(handler, topic)
         self._subscriptions.append((topic, handler))
 
+    def _matches_interface(self, interface: Any) -> bool:
+        if self._interface is None:
+            return False
+        if interface is None:
+            return False
+        return interface is self._interface
+
     def _handle_receive_event(
         self,
         packet: Dict[str, Any],
@@ -429,14 +570,20 @@ class MeshtasticBridge:
     ) -> None:
         # Topic argument is provided by pubsub; we ignore it aside from optional tracing.
         _ = topic
+        if not self._matches_interface(interface):
+            return
         self._on_packet(packet)
 
     def _handle_connection_established(self, interface: Any, topic: Any = None) -> None:
         _ = topic
+        if not self._matches_interface(interface):
+            return
         self._logger.info("Meshtastic connection established: %s", interface)
 
     def _handle_connection_lost(self, interface: Any, topic: Any = None) -> None:
         _ = topic
+        if not self._matches_interface(interface):
+            return
         self._logger.warning("Meshtastic connection lost: %s", interface)
 
     def _packet_timestamp(self, packet: Dict[str, Any]) -> str:
@@ -579,7 +726,13 @@ class MeshtasticBridge:
         return path
 
     def _derive_thread(self, packet: Dict[str, Any]) -> tuple[str, str, Dict[str, Any]]:
-        channel_info = packet.get("channel") or {}
+        channel_info_raw = packet.get("channel")
+        if isinstance(channel_info_raw, dict):
+            channel_info = dict(channel_info_raw)
+        elif isinstance(channel_info_raw, int):
+            channel_info = {"index": channel_info_raw}
+        else:
+            channel_info = {}
         decoded = packet.get("decoded", {})
         to_id = packet.get("toId") or decoded.get("dest")
         sender_id = packet.get("fromId") or decoded.get("from")
@@ -891,39 +1044,97 @@ def print_status(config: BridgeConfig) -> None:
 
 
 def main() -> None:
+    """Main entry point for the Meshtastic bridge."""
     args = parse_args()
     config = load_config(args.config)
 
     if args.log_dir:
         config.logs_dir = (args.log_dir if args.log_dir.is_absolute() else (BASE_DIR / args.log_dir)).resolve()
-    if args.serial_port:
-        config.serial_port = args.serial_port
 
     if args.status:
         print_status(config)
         return
 
     if args.test:
-        with tempfile.TemporaryDirectory(prefix="meshtastic_llm_test_") as tmp_dir:
-            tmp_root = Path(tmp_dir)
-            config.test_mode = True
-            config.data_root = tmp_root / "data"
-            config.nodes_base = config.data_root / "nodes"
-            config.prompts_dir = tmp_root / "prompts"
-            config.logs_dir = tmp_root / "logs"
-            config.prompts_dir.mkdir(parents=True, exist_ok=True)
-            config.logs_dir.mkdir(parents=True, exist_ok=True)
-            stub_interface = StubSerialInterface()
-            bridge = MeshtasticBridge(
-                config,
-                interface_factory=lambda: stub_interface,
-                cli_args=vars(args),
-            )
-            run_test_mode(bridge, stub_interface)
+        temp_dir = tempfile.mkdtemp(prefix="meshtastic-llm-test-")
+        config.data_root = Path(temp_dir)
+        config.nodes_base = config.data_root / "nodes"
+        config.test_mode = True
+        interface_factory = StubSerialInterface
+        cli_arg_dict = vars(args)
+        bridge = MeshtasticBridge(config=config, interface_factory=interface_factory, cli_args=cli_arg_dict)
+        assert isinstance(bridge._interface, StubSerialInterface)
+        run_test_mode(bridge, bridge._interface)
         return
 
-    bridge = MeshtasticBridge(config, cli_args=vars(args))
-    bridge.run()
+    ports_to_run: List[Optional[str]] = []
+    if args.serial_port:
+        ports_to_run.append(args.serial_port)
+    else:
+        available_ports = []
+        if list_ports:
+            try:
+                available_ports = [port.device for port in list_ports.comports()]
+            except Exception as exc:
+                print(f"Could not auto-detect serial ports: {exc}", file=sys.stderr)
+        
+        if not available_ports:
+            print("No serial ports detected. Attempting to connect with auto-detect...", file=sys.stderr)
+            ports_to_run.append(None)
+        elif len(available_ports) > 1:
+            print(f"Multiple serial ports detected: {available_ports}. Starting a bridge for each one.")
+            ports_to_run.extend(available_ports)
+        else:
+            print(f"One serial port detected: {available_ports[0]}.")
+            ports_to_run.append(available_ports[0])
+
+    threads = []
+    bridges: List[MeshtasticBridge] = []
+    stop_all_event = threading.Event()
+
+    def run_bridge_instance(port: Optional[str], cli_args: Dict[str, Any]) -> None:
+        instance_config = dataclasses.replace(config, serial_port=port)
+        bridge = MeshtasticBridge(config=instance_config, cli_args=cli_args)
+        bridges.append(bridge)
+        try:
+            bridge.start()
+            if bridge._interface is None:
+                return
+            while not stop_all_event.is_set() and not bridge._stop_event.is_set():
+                bridge._flush_outbound_queue()
+                time.sleep(instance_config.bridge_poll_interval)
+        except Exception as exc:
+            bridge._logger.exception("Unhandled exception in bridge thread for port %s: %s", port, exc)
+        finally:
+            if not bridge._stop_event.is_set():
+                bridge.stop()
+
+    for port in ports_to_run:
+        thread_args = vars(args).copy()
+        thread_args["serial_port"] = port
+        thread = threading.Thread(target=run_bridge_instance, args=(port, thread_args), daemon=True)
+        threads.append(thread)
+        thread.start()
+        time.sleep(1) # Stagger starts
+
+    if not threads:
+        print("No bridge instances were started.", file=sys.stderr)
+        return
+
+    try:
+        while any(t.is_alive() for t in threads):
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt received. Shutting down all bridge instances...")
+        stop_all_event.set()
+    finally:
+        for bridge in bridges:
+            if not bridge._stop_event.is_set():
+                bridge.stop()
+        for thread in threads:
+            thread.join(timeout=10)
+
+    print("All bridge instances have been shut down.")
 
 
 if __name__ == "__main__":

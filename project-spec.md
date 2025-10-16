@@ -231,15 +231,41 @@ Body outline
   - Brief summary of how the prompt was assembled (e.g., number of recent messages included)
 
 
-## Social Context — fit with High Desert Institute
-Meshtastic-LLM extends resilient, low-cost communications in remote or bandwidth-constrained environments with a compact, local “librarian” assistant. This aligns with common institute goals such as:
-- Field operations support: Provide quick answers, checklists, or summaries in places with limited connectivity
-- Community resilience: Offer a local knowledge helper over mesh without relying on the internet
-- Education and outreach: Demonstrate practical AI on constrained networks, supporting workshops and training
-- Privacy-first tooling: Keep data on-device, aligning with ethical use of AI and community trust
-- Research enablement: Capture structured telemetry and message logs that can inform studies of mobility, coverage, and usage patterns
+## Meshtastic-LLM Social Context
 
-This project complements existing mesh networking efforts by adding a pragmatic knowledge interface. The librarian pattern encourages concise, high-signal interactions suited to LoRa constraints while remaining accessible to non-expert users.
+### Organization & Mission
+High Desert Institute focuses on resilient communications and practical AI for remote, bandwidth-constrained communities. Meshtastic-LLM extends that mission by pairing LoRa mesh coverage with an offline, privacy-preserving knowledge assistant.
+
+### Partnerships & Collaborations
+- **Local field teams:** Provide real-world usage feedback and environmental telemetry.
+- **Community workshops:** Demonstrate mesh networking and offline AI deployments.
+- **Open-source contributors:** Maintain integrations with Meshtastic, Ollama, and OpenWebUI.
+
+### Use Cases & User Stories
+- Rapid field checklists and Q&A over mesh during expeditions.
+- Community resilience drills where residents rely on offline knowledge access.
+- Classroom demonstrations showcasing constrained-device AI workflows.
+
+### Community Impact & Benefits
+- Enhances situational awareness via structured CSV telemetry.
+- Empowers communities to run AI locally without internet dependencies.
+- Encourages ethical, privacy-first tooling aligned with institute values.
+
+### Accessibility & Inclusion
+- Text-only interactions suit low-bandwidth and multilingual contexts.
+- File-based workflows simplify auditing and allow CSV translation pipelines.
+- Offline deployment respects communities with limited or intermittent connectivity.
+
+### Ethical Considerations
+- All storage remains local; prompts can be audited via append-only logs.
+- Safety filters and refusal patterns are tracked for future implementation to avoid misuse.
+- Opt-in documentation ensures participants understand data retention practices.
+
+### Future Opportunities
+- Deploy packaged bundles or Docker images for easier field rollout.
+- Expand AI agent behavior with domain-specific playbooks and multi-turn memory.
+- Integrate additional telemetry analytics for coverage and movement studies.
+
 
 ## CLI Logging and Interpretability Style Guide
 
@@ -536,6 +562,7 @@ Legend:
   - [x] Meshtastic event subscription that records nodes, threads, and sightings
   - [x] Outbound queue monitor that marks rows outbound or backs off on failure
   - [?] Crash-safe resume logic covering queued→outbound lifecycle (baseline implementation; needs soak testing)
+  - [?] Adversarial code review
 - [ ] **`ai-agent.py` features**
   - [ ] Trigger detection for DMs and “librarian …” channel messages with cooldowns
   - [ ] Context assembly respecting MAX_CONTEXT_CHARS and minimal system prompt
