@@ -59,7 +59,8 @@ Filenames
 - DM files are named with the peer’s node ID where possible; fall back to a sanitized short/long name
 
 Atomicity & locking
-- Writes use a temp file + atomic rename pattern
+- Full rewrites (e.g., CSV header backfill or bulk replace) use a temp file + atomic rename pattern
+- Append operations hold an advisory per-file lock and append a single row directly to the CSV to avoid rewriting the entire file
 - A simple advisory lock file (e.g., .lock alongside the CSV) prevents concurrent writers from corrupting files. Locks are per-file within each nodes/<node_uid>/ tree to allow concurrent operation across multiple attached nodes.
 
 Jekyll compatibility
@@ -561,6 +562,8 @@ Legend:
   - [x] Thread CSV writers plus inbound dedupe on message_id or composite key
   - [x] Meshtastic event subscription that records nodes, threads, and sightings
   - [x] Outbound queue monitor that marks rows outbound or backs off on failure
+  - [x] PubSub listener scoping so each bridge only handles its own interface
+  - [x] Serial port scan throttling and noise reduction between retries
   - [?] Crash-safe resume logic covering queued→outbound lifecycle (baseline implementation; needs soak testing)
   - [?] Adversarial code review
 - [ ] **`ai-agent.py` features**
@@ -574,6 +577,7 @@ Legend:
   - [x] CSV helpers for atomic append, advisory locks, and schema validation, incl. filename sanitization
   - [?] Observability: structured logging, essential counters, optional metrics endpoint (basic logging in place)
   - [?] Error handling hardening for corrupt CSVs, partial writes, disk-full scenarios (core patterns implemented; more guards needed)
+  - [ ] Serial port filtering via `meshtastic.util` helpers to avoid probing unrelated devices
   - [ ] End-to-end integration checks to prevent duplicate sends across restarts
   - [ ] Test suite covering unit cases, Meshtastic mock, Ollama stub, and prompt golden files
   - [x] Run supervision scripts (e.g., `run.sh`) to start/restart both services with logging
