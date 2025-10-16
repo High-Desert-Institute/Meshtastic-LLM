@@ -7,6 +7,5 @@ rm get-docker.sh
 
 
 # Install Python dependencies
-pip install meshtastic ollama
 pip install -r requirements.txt
 

@@ -71,6 +71,7 @@ THREAD_HEADERS = [
 
 MAX_SEND_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 5
+MAX_CONNECT_ATTEMPTS = 4  # roughly one minute of backoff retries
 
 
 @dataclasses.dataclass
@@ -362,6 +363,10 @@ class MeshtasticBridge:
             self._cached_ports = ports
             self._cached_ports_timestamp = now
             self._initial_port_scan_done = True
+            if ports:
+                self._logger.info("Detected serial ports: %s", ", ".join(ports))
+            else:
+                self._logger.info("Serial port scan completed; no devices detected.")
             return ports
         except Exception as exc:  # pragma: no cover
             self._logger.debug("Failed to enumerate serial ports: %s", exc)
@@ -401,7 +406,7 @@ class MeshtasticBridge:
             else:
                 self._logger.debug(message)
 
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and attempt < MAX_CONNECT_ATTEMPTS:
             attempt += 1
             port_label = self.config.serial_port or "auto-detect"
             if attempt == 1:
@@ -433,6 +438,15 @@ class MeshtasticBridge:
             if self._stop_event.wait(backoff_seconds):
                 break
             backoff_seconds = min(backoff_seconds * 1.5, 60.0)
+        if not self._stop_event.is_set() and self._interface is None:
+            self._logger.error(
+                "Unable to connect to Meshtastic device after %s attempts (port=%s); giving up", 
+                MAX_CONNECT_ATTEMPTS,
+                self.config.serial_port or "auto-detect",
+            )
+            available = self._available_ports()
+            if available:
+                self._logger.info("Currently detected serial ports: %s", ", ".join(available))
         return False
 
     def _resolve_node_uid(self) -> str:
