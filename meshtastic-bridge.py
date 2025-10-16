@@ -289,6 +289,7 @@ class MeshtasticBridge:
         self._cached_ports: List[str] = []
         self._cached_ports_timestamp: float = 0.0
         self._initial_port_scan_done = False
+        self._ever_connected = False
 
     def _configure_logging(self) -> None:
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -386,6 +387,7 @@ class MeshtasticBridge:
         attempt = 0
         last_warning_message: Optional[str] = None
         last_warning_timestamp = 0.0
+        max_attempts = None if self._ever_connected else MAX_CONNECT_ATTEMPTS
 
         def _log_wait(message: str, include_ports: bool = True) -> None:
             nonlocal last_warning_message, last_warning_timestamp
@@ -406,7 +408,9 @@ class MeshtasticBridge:
             else:
                 self._logger.debug(message)
 
-        while not self._stop_event.is_set() and attempt < MAX_CONNECT_ATTEMPTS:
+        while not self._stop_event.is_set():
+            if max_attempts is not None and attempt >= max_attempts:
+                break
             attempt += 1
             port_label = self.config.serial_port or "auto-detect"
             if attempt == 1:
@@ -419,6 +423,7 @@ class MeshtasticBridge:
                 )
             try:
                 self._interface = SerialInterface(**kwargs)
+                self._ever_connected = True
                 self._logger.info("Connected to Meshtastic device")
                 last_warning_message = None
                 return True
@@ -438,7 +443,14 @@ class MeshtasticBridge:
             if self._stop_event.wait(backoff_seconds):
                 break
             backoff_seconds = min(backoff_seconds * 1.5, 60.0)
-        if not self._stop_event.is_set() and self._interface is None:
+        exhausted = (
+            not self._stop_event.is_set()
+            and self._interface is None
+            and max_attempts is not None
+            and attempt >= max_attempts
+            and not self._ever_connected
+        )
+        if exhausted:
             self._logger.error(
                 "Unable to connect to Meshtastic device after %s attempts (port=%s); giving up", 
                 MAX_CONNECT_ATTEMPTS,
