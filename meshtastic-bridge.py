@@ -293,6 +293,19 @@ def is_broadcast_to_id(value: Any) -> bool:
     return text in DM_BROADCAST_SENTINELS
 
 
+def extract_routing(packet: Dict[str, Any]) -> Dict[str, Any]:
+    decoded = packet.get("decoded")
+    if not isinstance(decoded, dict):
+        return {}
+    routing = decoded.get("routing")
+    if isinstance(routing, dict):
+        return routing
+    try:
+        return json.loads(routing) if isinstance(routing, str) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
 class MeshtasticBridge:
     def __init__(
         self,
@@ -735,6 +748,7 @@ class MeshtasticBridge:
         meta: Dict[str, Any] = {
             "channel_index": channel_meta.get("index"),
             "channel_name": channel_meta.get("name"),
+            "routing": channel_meta.get("routing") or {},
             "raw_portnum": decoded.get("portnum"),
         }
         row = {
@@ -763,7 +777,12 @@ class MeshtasticBridge:
             ):
                 return
         self._csv.append_row(csv_path, THREAD_HEADERS, row)
-        self._logger.info("Recorded inbound message %s (%s:%s)", message_id, thread_type, thread_key)
+        if thread_type == "dm":
+            self._logger.info("Recorded inbound DM %s (peer=%s)", message_id, thread_key)
+        else:
+            self._logger.info(
+                "Recorded inbound channel message %s (channel:%s)", message_id, thread_key
+            )
         self._upsert_node(packet, decoded.get("payload") if isinstance(decoded.get("payload"), dict) else None)
 
     def _thread_csv_path(self, thread_type: str, thread_key: str) -> Path:
@@ -778,6 +797,7 @@ class MeshtasticBridge:
         return path
 
     def _derive_thread(self, packet: Dict[str, Any]) -> tuple[str, str, Dict[str, Any]]:
+        # Channel information can arrive as ints in some packets; normalize into a dict
         channel_info_raw = packet.get("channel")
         if isinstance(channel_info_raw, dict):
             channel_info = dict(channel_info_raw)
@@ -785,17 +805,40 @@ class MeshtasticBridge:
             channel_info = {"index": channel_info_raw}
         else:
             channel_info = {}
+
         decoded = packet.get("decoded", {})
+        routing = extract_routing(packet)
         portnum_name = normalize_portnum(decoded.get("portnum"))
-        to_id = packet.get("toId") or decoded.get("dest") or decoded.get("to")
-        sender_id = packet.get("fromId") or decoded.get("from")
-        channel_name = channel_info.get("name")
+
+        to_id = (
+            routing.get("destinationId")
+            or routing.get("destId")
+            or routing.get("dest")
+            or packet.get("toId")
+            or decoded.get("dest")
+            or decoded.get("to")
+        )
+        sender_id = (
+            packet.get("fromId")
+            or routing.get("sourceId")
+            or routing.get("source")
+            or decoded.get("from")
+        )
+
+        channel_name = channel_info.get("name") or routing.get("channelName")
+        channel_index = channel_info.get("index")
+        if channel_index is None:
+            try:
+                channel_index = int(routing.get("channel"))
+            except (TypeError, ValueError):
+                channel_index = None
 
         direct_target = bool(to_id) and not is_broadcast_to_id(to_id)
         is_private_port = portnum_name in {"PRIVATE_APP", "REPLY_APP"}
+        reply_path = routing.get("replyId") or routing.get("via")
 
-        if direct_target or is_private_port:
-            peer_reference = sender_id or to_id or "dm_peer"
+        if direct_target or is_private_port or reply_path:
+            peer_reference = sender_id or to_id or routing.get("id") or "dm_peer"
             thread_type = "dm"
             thread_key = str(peer_reference)
         elif channel_name:
@@ -803,8 +846,16 @@ class MeshtasticBridge:
             thread_key = str(channel_name)
         else:
             thread_type = "channel"
-            thread_key = f"channel_{channel_info.get('index', 0)}"
-        return thread_type, thread_key, {"index": channel_info.get("index"), "name": channel_name}
+            idx = channel_index if channel_index is not None else 0
+            thread_key = f"channel_{idx}"
+
+        meta = {"index": channel_index, "name": channel_name}
+        if direct_target:
+            meta["destination_id"] = to_id
+        if routing:
+            meta["routing"] = routing
+
+        return thread_type, thread_key, meta
 
     def _extract_text(self, decoded: Dict[str, Any]) -> Optional[str]:
         payload = decoded.get("payload")
