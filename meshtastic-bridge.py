@@ -458,7 +458,7 @@ class MeshtasticBridge:
                         extra={"suppress_console": True},
                     )
                 else:
-                    self._logger.debug(message)
+                    self._logger.warning(message, extra={"suppress_console": True})
                 last_warning_message = message
                 last_warning_timestamp = now
             else:
