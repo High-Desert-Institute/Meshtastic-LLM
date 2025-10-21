@@ -52,13 +52,21 @@ fi
 
 # Run Ollama container if it is not already up
 if ! docker ps --format '{{.Names}}' | grep -q '^ollama$'; then
-	docker run -d -v ollama:/root/.ollama -p 11434:11434 --network "${NETWORK_NAME}" --name ollama ollama/ollama
+	if docker ps -a --format '{{.Names}}' | grep -q '^ollama$'; then
+		docker start ollama >/dev/null
+	else
+		docker run -d -v ollama:/root/.ollama -p 11434:11434 --network "${NETWORK_NAME}" --restart unless-stopped --name ollama ollama/ollama
+	fi
 fi
 ensure_container_network "ollama"
 
 # Run OpenWebUI container if it is not already up
 if ! docker ps --format '{{.Names}}' | grep -q '^open-webui$'; then
-	docker run -d -p 3000:8080 -v open-webui:/app/backend/data --network "${NETWORK_NAME}" --name open-webui ghcr.io/open-webui/open-webui:main
+	if docker ps -a --format '{{.Names}}' | grep -q '^open-webui$'; then
+		docker start open-webui >/dev/null
+	else
+		docker run -d -p 3000:8080 -v open-webui:/app/backend/data --network "${NETWORK_NAME}" --restart unless-stopped --name open-webui ghcr.io/open-webui/open-webui:main
+	fi
 fi
 ensure_container_network "open-webui"
 
