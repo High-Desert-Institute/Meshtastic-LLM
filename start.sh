@@ -1,7 +1,32 @@
 #!/bin/bash
 set -euo pipefail
 
+if [ -z "${BASH_VERSION:-}" ]; then
+	echo "This script must be executed with bash." >&2
+	exit 1
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run as root." >&2
+    exit 1
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+VENV_DIR="${VENV_DIR:-${ROOT_DIR}/.venv}"
+
+if [ -z "${PYTHON_BIN:-}" ]; then
+	if [ -x "${VENV_DIR}/bin/python" ]; then
+		PYTHON_BIN="${VENV_DIR}/bin/python"
+	else
+		PYTHON_BIN="$(command -v python3 || true)"
+	fi
+fi
+
+if [ -z "${PYTHON_BIN}" ]; then
+	echo "Unable to locate python3. Set PYTHON_BIN or create a virtual environment." >&2
+	exit 1
+fi
 
 NETWORK_NAME="${DOCKER_NETWORK_NAME:-meshtastic-net}"
 
@@ -22,7 +47,7 @@ ensure_container_network() {
 }
 
 if [ -f "${ROOT_DIR}/requirements.txt" ]; then
-	python3 -m pip install --upgrade -r "${ROOT_DIR}/requirements.txt"
+	"${PYTHON_BIN}" -m pip install --upgrade -r "${ROOT_DIR}/requirements.txt"
 fi
 
 # Run Ollama container if it is not already up
@@ -38,5 +63,4 @@ fi
 ensure_container_network "open-webui"
 
 # Launch the Meshtastic bridge for local testing
-python -m pip install --upgrade -r requirements.txt
-exec python3 "${ROOT_DIR}/meshtastic-bridge.py" --config "${ROOT_DIR}/config/default.toml"
+exec "${PYTHON_BIN}" "${ROOT_DIR}/meshtastic-bridge.py" --config "${ROOT_DIR}/config/default.toml"
