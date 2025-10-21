@@ -329,6 +329,7 @@ class MeshtasticBridge:
         self._cached_ports_timestamp: float = 0.0
         self._initial_port_scan_done = False
         self._ever_connected = False
+        self._routing_debug_count = 0
 
     def _configure_logging(self) -> None:
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -848,6 +849,22 @@ class MeshtasticBridge:
             thread_type = "channel"
             idx = channel_index if channel_index is not None else 0
             thread_key = f"channel_{idx}"
+
+        if (
+            thread_type == "channel"
+            and routing
+            and not channel_name
+            and channel_index is None
+            and self._routing_debug_count < 5
+        ):
+            # Surface the unknown routing payload so we can adjust DM detection rules.
+            self._routing_debug_count += 1
+            self._logger.info(
+                "Routing metadata present but treated as channel: routing=%s to_id=%s port=%s",
+                routing,
+                to_id,
+                portnum_name,
+            )
 
         meta = {"index": channel_index, "name": channel_name}
         if direct_target:
