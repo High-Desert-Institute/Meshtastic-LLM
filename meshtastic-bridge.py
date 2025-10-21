@@ -344,6 +344,10 @@ class MeshtasticBridge:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         console_handler.setLevel(logging.INFO)
+        class _ConsoleFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                return not getattr(record, "suppress_console", False)
+        console_handler.addFilter(_ConsoleFilter())
         self._logger.handlers.clear()
         self._logger.addHandler(file_handler)
         self._logger.addHandler(console_handler)
@@ -405,9 +409,16 @@ class MeshtasticBridge:
             self._cached_ports_timestamp = now
             self._initial_port_scan_done = True
             if ports:
-                self._logger.info("Detected serial ports: %s", ", ".join(ports))
+                self._logger.info(
+                    "Detected serial ports: %s",
+                    ", ".join(ports),
+                    extra={"suppress_console": True},
+                )
             else:
-                self._logger.info("Serial port scan completed; no devices detected.")
+                self._logger.info(
+                    "Serial port scan completed; no devices detected.",
+                    extra={"suppress_console": True},
+                )
             return ports
         except Exception as exc:  # pragma: no cover
             self._logger.debug("Failed to enumerate serial ports: %s", exc)
@@ -434,12 +445,17 @@ class MeshtasticBridge:
             now = time.time()
             if message != last_warning_message or (now - last_warning_timestamp) >= 60.0:
                 if include_ports:
-                    self._logger.warning(message)
+                    self._logger.warning(message, extra={"suppress_console": True})
                     available = self._available_ports()
                     if available:
-                        self._logger.warning("Detected serial ports: %s", ", ".join(available))
+                        self._logger.warning(
+                            "Detected serial ports: %s",
+                            ", ".join(available),
+                            extra={"suppress_console": True},
+                        )
                     self._logger.warning(
-                        "Waiting for Meshtastic device. Ensure the radio is plugged in and no other tools are using it."
+                        "Waiting for Meshtastic device. Ensure the radio is plugged in and no other tools are using it.",
+                        extra={"suppress_console": True},
                     )
                 else:
                     self._logger.debug(message)
@@ -454,12 +470,17 @@ class MeshtasticBridge:
             attempt += 1
             port_label = self.config.serial_port or "auto-detect"
             if attempt == 1:
-                self._logger.info("Attempting to open Meshtastic interface (port=%s)", port_label)
+                self._logger.info(
+                    "Attempting to open Meshtastic interface (port=%s)",
+                    port_label,
+                    extra={"suppress_console": True},
+                )
             else:
                 self._logger.info(
                     "Retrying Meshtastic interface connection (attempt %s, port=%s)",
                     attempt,
                     port_label,
+                    extra={"suppress_console": True},
                 )
             try:
                 self._interface = SerialInterface(**kwargs)
