@@ -72,6 +72,14 @@ THREAD_HEADERS = [
 MAX_SEND_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 5
 MAX_CONNECT_ATTEMPTS = 4  # roughly one minute of backoff retries
+DM_BROADCAST_SENTINELS = {
+    "^all",
+    "^broadcast",
+    "ffffffff",
+    "0xffffffff",
+    "4294967295",
+    "ffffffffffffffff",
+}
 
 
 @dataclasses.dataclass
@@ -265,6 +273,24 @@ def load_meta(row: Dict[str, str]) -> Dict[str, Any]:
 
 def dump_meta(meta: Dict[str, Any]) -> str:
     return json.dumps(meta, separators=(",", ":"), ensure_ascii=True)
+
+
+def normalize_portnum(portnum_raw: Any) -> str:
+    if isinstance(portnum_raw, str):
+        return portnum_raw.upper()
+    if isinstance(portnum_raw, int):
+        try:
+            return portnums.PortNum.Name(portnum_raw)
+        except ValueError:
+            return str(portnum_raw)
+    return ""
+
+
+def is_broadcast_to_id(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in DM_BROADCAST_SENTINELS
 
 
 class MeshtasticBridge:
@@ -760,12 +786,18 @@ class MeshtasticBridge:
         else:
             channel_info = {}
         decoded = packet.get("decoded", {})
-        to_id = packet.get("toId") or decoded.get("dest")
+        portnum_name = normalize_portnum(decoded.get("portnum"))
+        to_id = packet.get("toId") or decoded.get("dest") or decoded.get("to")
         sender_id = packet.get("fromId") or decoded.get("from")
         channel_name = channel_info.get("name")
-        if to_id and to_id not in ("^all", "^broadcast", "ffffffff", "4294967295"):
+
+        direct_target = bool(to_id) and not is_broadcast_to_id(to_id)
+        is_private_port = portnum_name in {"PRIVATE_APP", "REPLY_APP"}
+
+        if direct_target or is_private_port:
+            peer_reference = sender_id or to_id or "dm_peer"
             thread_type = "dm"
-            thread_key = str(sender_id or to_id)
+            thread_key = str(peer_reference)
         elif channel_name:
             thread_type = "channel"
             thread_key = str(channel_name)
