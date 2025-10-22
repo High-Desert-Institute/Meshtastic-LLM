@@ -220,4 +220,4 @@ __marimo__/
 *.csv
 *.sqlite3
 *.db
-./other
+other/**
