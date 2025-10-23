@@ -156,11 +156,15 @@ Use a small config file (YAML or TOML) and/or environment variables. Suggested k
 - NODE_UID_STRATEGY (auto|config); auto derives from device/node ID; config allows explicit mapping
  - PERSONAS_DIR (default ./config/personas) — directory of persona configuration files (TOML)
 
+Notes
+- Persona `timezone` overrides global `TIMEZONE` for persona-scoped behaviors (e.g., status display, `today_calls` rollovers, and time formatting in control replies). If not specified, default is Los_Angeles (America/Los_Angeles).
+
 ### Personas (configurable agents)
 
 Personas define named assistant profiles that the AI agent can invoke based on triggers in messages. Each persona is configured via a TOML file in `config/personas/` and includes:
 
 - name: Unique identifier that also serves as a channel trigger word (e.g., "librarian").
+- timezone: IANA timezone name controlling local day boundaries and display formatting (e.g., "America/Los_Angeles"). Default: Los_Angeles (America/Los_Angeles).
 - triggers: Optional list of trigger aliases (e.g., ["librarian", "lib"]).
 - description: Human-readable summary of the persona.
 - system_prompt: The base/system instructions for the assistant.
@@ -207,6 +211,29 @@ Selection rules
 Initial personas
 - elmer: a helpful amateur radio mentor focused on Meshtastic and radio practice (no RAG).
 - librarian: a concise research librarian that can use local RAG tools for harder questions.
+
+#### Persona control commands (non-LLM)
+
+Agents must respond immediately to certain control commands without invoking the LLM. These commands are case‑insensitive, must appear at the beginning of the message, and take the form `<persona> <command>`.
+
+Supported commands
+- `<persona> stop` — Immediately mark the persona as not running (global). Replies with a brief confirmation. No LLM call.
+- `<persona> start` — Enable the persona (global). Replies with a brief confirmation. No LLM call.
+- `<persona> status` — Reply with a concise status summary using the persona’s timezone (e.g., PST/PDT for Los_Angeles): datetime, agent name, running/not-running, lifetime_calls (lifetime), today_calls (persona-local date), last_started (ISO 8601 with offset), and optionally current LLM queue length.
+- `<persona> config` — Reply with the entire TOML config file for that persona, split across multiple messages as needed using the persona’s `max_message_chars` field. No LLM call.
+- `<persona> help` replies with a link to the github repository.
+
+Reply mechanics
+- Control replies are written as queued messages to the relevant thread (DM or channel), then sent by the bridge.
+- Control replies do not count as LLM calls; however, `total_calls` and `today_calls` track LLM responses only. A separate `control_calls` counter tracks control command invocations.
+
+Persistence and atomicity
+- Persona runtime fields are stored in the persona TOML file itself (e.g., `running`, `total_calls`, `today_calls`, `today_date`, `last_started`, `timezone`).
+- Updates use atomic write: write to a temp file in the same directory, then rename over the original; use an advisory lock file (e.g., `.lock`) while writing.
+- `today_calls` resets when `today_date` differs from the current date in the persona’s configured timezone.
+
+Ordering and independence
+- These control commands must work independently of any LLM features and should be implemented before LLM reply generation.
 
 ### Operational behavior
 - Startup
@@ -622,6 +649,14 @@ Legend:
 - [ ] **personas**
   - [x] Define persona config schema and directory: `config/personas/*.toml`
   - [x] Add two initial personas: `librarian` (RAG-enabled) and `elmer` (ham radio mentor)
+  - [ ] Non-LLM control commands: `<persona> stop|start|status|config` with immediate replies (no model calls)
+  - [ ] Persist runtime fields in persona TOML using atomic writes + advisory locks (`running`, `total_calls`, `today_calls`, `today_date`, `last_started`, `timezone`)
+  - [ ] Implement `config` response splitting by `max_message_chars` into multiple queued messages
+  - [ ] Global start/stop semantics across all nodes; concise confirmations
+  - [ ] Timezone handling: default to Los_Angeles; support IANA names; status timestamps and `today_calls` rollover use persona timezone
+  - [ ] Unit tests: command parsing, persistence, stats rollover by UTC day, message chunking
+  - [ ] Docs: README section for persona commands and examples
+  - [ ] Precedence: ship these before AI reply features
   - [ ] Persona loader in AI agent with validation and helpful errors
   - [ ] Trigger detection updated to match any configured persona trigger in channels; default persona for DMs
   - [ ] Per-persona overrides for model, temperature, context limits, and cooldown

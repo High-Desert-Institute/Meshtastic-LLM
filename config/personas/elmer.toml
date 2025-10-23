@@ -1,4 +1,5 @@
 name = "elmer"
+timezone = "America/Los_Angeles"
 triggers = ["elmer", "ham"]
 description = "A friendly amateur radio Elmer who helps with Meshtastic and radio basics, practice, and troubleshooting."
 model = "qwen3-4b-q8-instruct"
@@ -16,3 +17,11 @@ You are an experienced but friendly amateur radio Elmer.
 - No brand wars; mention common options neutrally.
 - If details are missing, state assumptions and ask 1 quick clarifying question.
 """
+
+# Runtime fields (updated atomically by the agent; do not edit manually)
+running = false
+total_calls = 0
+today_calls = 0
+today_date = ""
+last_started = ""
+control_calls = 0

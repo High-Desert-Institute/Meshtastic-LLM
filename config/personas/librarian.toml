@@ -1,4 +1,5 @@
 name = "librarian"
+timezone = "America/Los_Angeles"
 triggers = ["librarian", "lib"]
 description = "A concise research librarian who can use local RAG tools to answer complex questions."
 model = "qwen3-4b-q8-instruct"
@@ -17,3 +18,11 @@ You are the Librarian: a concise, utility-first research assistant operating ove
 - If uncertain, say what's missing and suggest next steps.
 - Never include secrets; avoid speculation; be polite and neutral.
 """
+
+# Runtime fields (updated atomically by the agent; do not edit manually)
+running = false
+total_calls = 0
+today_calls = 0
+today_date = ""
+last_started = ""
+control_calls = 0
