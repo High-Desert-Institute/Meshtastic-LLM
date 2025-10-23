@@ -19,9 +19,10 @@ You are an experienced but friendly amateur radio Elmer.
 """
 
 # Runtime fields (updated atomically by the agent; do not edit manually)
-running = false
+running = true
 total_calls = 0
 today_calls = 0
-today_date = ""
-last_started = ""
-control_calls = 0
+today_date = "2025-10-23"
+last_started = "2025-10-23T01:17:02.957497-07:00"
+control_calls = 9
+queue_count = 0

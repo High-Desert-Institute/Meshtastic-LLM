@@ -348,8 +348,11 @@ class MeshtasticBridge:
     ) -> None:
         self.config = config
         self._stop_event = threading.Event()
-        self._logger = logging.getLogger("meshtastic_bridge")
+        self._port_label = config.serial_port or "auto"
+        logger_name = f"meshtastic_bridge[{self._port_label}]"
+        self._logger = logging.getLogger(logger_name)
         self._logger.setLevel(logging.INFO)
+        self._logger.propagate = False
         self._interface_factory = interface_factory
         self._cli_args = cli_args or {}
         self._log_path: Optional[Path] = None
@@ -366,22 +369,47 @@ class MeshtasticBridge:
 
     def _configure_logging(self) -> None:
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = dt.datetime.now(dt.timezone.utc).strftime("log.%Y-%m-%d-%H-%M-%S-%f.txt")
-        log_path = self.config.logs_dir / timestamp
+        safe_port = str(self._port_label or "auto").replace(os.sep, "_").replace("/", "_")
+        timestamp = dt.datetime.now(dt.timezone.utc).strftime("log.%Y-%m-%d-%H-%M-%S-%f")
+        log_filename = f"{timestamp}.bridge.{safe_port}.txt"
+        log_path = self.config.logs_dir / log_filename
         self._log_path = log_path
         self.config.log_file = log_path
-        formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+        for handler in list(self._logger.handlers):
+            self._logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+
+        class _PortFilter(logging.Filter):
+            def __init__(self, label: str) -> None:
+                super().__init__()
+                self._label = label
+
+            def filter(self, record: logging.LogRecord) -> bool:
+                record.port_label = self._label
+                return True
+
+        formatter = logging.Formatter("%(asctime)s %(levelname)s [%(port_label)s] %(message)s")
+
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
         file_handler.setLevel(logging.INFO)
+        file_handler.addFilter(_PortFilter(self._port_label))
+
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         console_handler.setLevel(logging.INFO)
+
         class _ConsoleFilter(logging.Filter):
             def filter(self, record: logging.LogRecord) -> bool:
                 return not getattr(record, "suppress_console", False)
+
         console_handler.addFilter(_ConsoleFilter())
-        self._logger.handlers.clear()
+        console_handler.addFilter(_PortFilter(self._port_label))
+
         self._logger.addHandler(file_handler)
         self._logger.addHandler(console_handler)
         serializable_cli_args = {
@@ -1024,17 +1052,31 @@ class MeshtasticBridge:
     def _send_row(self, row: Dict[str, str]) -> bool:
         assert self._interface is not None
         try:
+            content = row.get("content", "")
+            reply_to_id_raw = row.get("reply_to_id")
+            reply_id: Optional[int] = None
+            if reply_to_id_raw:
+                try:
+                    reply_id = int(reply_to_id_raw)
+                except (ValueError, TypeError):
+                    self._logger.warning(
+                        "Invalid reply_to_id '%s' for message %s; sending without reply context.",
+                        reply_to_id_raw,
+                        row.get("message_id"),
+                    )
+                    reply_id = None
+
             if row.get("thread_type") == "dm":
                 dest = row.get("thread_key")
                 if not dest:
                     raise ValueError("Missing thread_key for DM send")
-                self._interface.sendText(row.get("content", ""), dest)
+                self._interface.sendText(content, destinationId=dest, replyId=reply_id)
             else:
                 meta = load_meta(row)
                 channel_index = meta.get("channel_index")
                 if channel_index is None:
                     channel_index = 0
-                self._interface.sendText(row.get("content", ""), channelIndex=int(channel_index))
+                self._interface.sendText(content, channelIndex=int(channel_index), replyId=reply_id)
             self._logger.info(
                 "Sent queued message %s (%s:%s)",
                 row.get("message_id"),
@@ -1281,10 +1323,12 @@ def main() -> None:
         try:
             bridge.start()
             if bridge._interface is None:
+                bridge._logger.info("Bridge thread exiting; interface not established")
                 return
             while not stop_all_event.is_set() and not bridge._stop_event.is_set():
                 bridge._flush_outbound_queue()
                 time.sleep(instance_config.bridge_poll_interval)
+            bridge._logger.info("Bridge thread loop ending; stop flag set")
         except Exception as exc:
             bridge._logger.exception("Unhandled exception in bridge thread for port %s: %s", port, exc)
         finally:

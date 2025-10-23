@@ -156,6 +156,7 @@ Use a small config file (YAML or TOML) and/or environment variables. Suggested k
 - NODES_BASE_DIR (default ./data/nodes)
 - NODE_UID_STRATEGY (auto|config); auto derives from device/node ID; config allows explicit mapping
  - PERSONAS_DIR (default ./config/personas) — directory of persona configuration files (TOML)
+ - AI.IGNORE_CHANNEL_INDEXES (list of ints; default [0]) — do not respond on these channel indexes (e.g., 0 is the default public channel); accepts env override as comma-separated string or JSON list
 
 Notes
 - Persona `timezone` overrides global `TIMEZONE` for persona-scoped behaviors (e.g., status display, `today_calls` rollovers, and time formatting in control replies). If not specified, default is Los_Angeles (America/Los_Angeles).

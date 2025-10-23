@@ -15,6 +15,7 @@ max_message_chars = 200
 max_context_chars = 2000
 reply_cooldown_seconds = 120
 enable_prompt_logs = true
+ignore_channel_indexes = [0]
 
 [ollama]
 base_url = "http://localhost:11434"

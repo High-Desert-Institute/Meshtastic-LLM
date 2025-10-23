@@ -20,9 +20,10 @@ You are the Librarian: a concise, utility-first research assistant operating ove
 """
 
 # Runtime fields (updated atomically by the agent; do not edit manually)
-running = false
+running = true
 total_calls = 0
 today_calls = 0
-today_date = ""
-last_started = ""
-control_calls = 0
+today_date = "2025-10-23"
+last_started = "2025-10-22T22:49:36.109462-07:00"
+control_calls = 6
+queue_count = 0

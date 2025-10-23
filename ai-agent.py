@@ -9,6 +9,7 @@ import datetime as dt
 import json
 import logging
 import os
+import random
 import tempfile
 import threading
 import time
@@ -74,6 +75,7 @@ class AgentConfig:
     timezone: str
     env_prefix: str
     default_persona: str
+    ignore_channel_indexes: List[int]
     log_file: Optional[Path] = None
 
 
@@ -85,6 +87,7 @@ class PersonaRuntime:
     today_date: str = ""
     last_started: str = ""
     control_calls: int = 0
+    queue_count: int = 0
 
 
 class FileLock:
@@ -248,6 +251,9 @@ def load_config(path: Path, env_prefix: str = DEFAULT_ENV_PREFIX) -> AgentConfig
     poll_ms = float(overrides.get("ai.ai_poll_interval_ms", ai_cfg.get("ai_poll_interval_ms", ai_cfg.get("poll_interval_ms", 1000))))
     timezone = str(overrides.get("general.timezone", general_cfg.get("timezone", "UTC")))
     default_persona = str(overrides.get("ai.default_persona", ai_cfg.get("default_persona", DEFAULT_PERSONA_NAME)))
+    ignore_default = ai_cfg.get("ignore_channel_indexes", [0])
+    override_ignore = overrides.get("ai.ignore_channel_indexes")
+    ignore_channel_indexes = _parse_int_list(override_ignore) if override_ignore is not None else _ensure_int_list(ignore_default)
 
     return AgentConfig(
         data_root=data_root,
@@ -259,7 +265,45 @@ def load_config(path: Path, env_prefix: str = DEFAULT_ENV_PREFIX) -> AgentConfig
         timezone=timezone,
         env_prefix=prefix,
         default_persona=default_persona,
+        ignore_channel_indexes=ignore_channel_indexes,
     )
+
+
+def _parse_int_list(raw: str) -> List[int]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        # Support JSON-like input, e.g. "[0,2]"
+        val = json.loads(text)
+        if isinstance(val, list):
+            return [int(x) for x in val]
+    except Exception:
+        pass
+    # Fallback: comma-separated list, e.g. "0,2, 4"
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    result: List[int] = []
+    for p in parts:
+        try:
+            result.append(int(p))
+        except ValueError:
+            continue
+    return result
+
+
+def _ensure_int_list(val: Any) -> List[int]:
+    if isinstance(val, list):
+        out: List[int] = []
+        for x in val:
+            try:
+                out.append(int(x))
+            except Exception:
+                continue
+        return out
+    try:
+        return [int(val)]
+    except Exception:
+        return []
 
 
 def _extract_env_overrides(prefix: str) -> Dict[str, str]:
@@ -345,6 +389,7 @@ class Persona:
             f"today_date = \"{self.runtime.today_date}\"",
             f"last_started = \"{self.runtime.last_started}\"",
             f"control_calls = {int(self.runtime.control_calls)}",
+            f"queue_count = {int(self.runtime.queue_count)}",
         ]
 
     def write_runtime(self) -> None:
@@ -378,11 +423,21 @@ class Persona:
                 last_display = parsed.astimezone(self.get_zone()).strftime("%Y-%m-%d %H:%M:%S %Z")
             except ValueError:
                 last_display = self.runtime.last_started
+        local_now = now.astimezone(self.get_zone())
+        tz_name = local_now.tzname() or self.timezone
+        last_display = "never"
+        if self.runtime.last_started:
+            try:
+                parsed = dt.datetime.fromisoformat(self.runtime.last_started)
+                last_display = parsed.astimezone(self.get_zone()).strftime("%Y-%m-%d %H:%M:%S %Z")
+            except ValueError:
+                last_display = self.runtime.last_started
         state = "running" if self.runtime.running else "stopped"
         prefix = local_now.strftime("%Y-%m-%d %H:%M:%S")
         return (
-            f"{prefix} {tz_name} — {self.name} {state}; total={self.runtime.total_calls}; "
-            f"today={self.runtime.today_calls}; last_started={last_display}"
+            f"{prefix} {tz_name} | {self.name} is {state}. "
+            f"Calls: {self.runtime.total_calls} total, {self.runtime.today_calls} today. "
+            f"Last start: {last_display}."
         )
 
 
@@ -423,6 +478,7 @@ class PersonaRegistry:
                     today_date=str(doc.get("today_date", "")),
                     last_started=str(doc.get("last_started", "")),
                     control_calls=int(doc.get("control_calls", 0) or 0),
+                    queue_count=int(doc.get("queue_count", 0) or 0),
                 )
                 persona = Persona(path=path, doc=doc, runtime=runtime, head_text=head_text, comment_line=comment_line)
                 key = persona.name.lower()
@@ -454,15 +510,16 @@ class AIAgent:
         self.config = config
         self._stop_event = threading.Event()
         self._logger = logging.getLogger("ai_agent")
-        self._logger.setLevel(logging.INFO)
+        self._logger.setLevel(logging.DEBUG)
         self._configure_logging()
         self._csv = CSVStore(self._logger)
         self.personas = PersonaRegistry(config.personas_dir, self._logger, config.default_persona)
         self._logger.info("AI agent configured with nodes base %s", self.config.nodes_base)
+        self._queue_counts: Dict[str, int] = {}
 
     def _configure_logging(self) -> None:
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = dt.datetime.now(dt.timezone.utc).strftime("log.%Y-%m-%d-%H-%M-%S-%f.txt")
+        timestamp = dt.datetime.now(dt.timezone.utc).strftime("log.%Y-%m-%d-%H-%M-%S-%f.agent.txt")
         log_path = self.config.logs_dir / timestamp
         handler = logging.FileHandler(log_path, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -490,67 +547,191 @@ class AIAgent:
         self._stop_event.set()
 
     def scan_once(self) -> None:
+        self._logger.debug("Starting scan loop")
+        self.personas.reload()
+        self._logger.debug("Loaded %d personas", len(self.personas.all()))
+        queue_counts = {persona.name: 0 for persona in self.personas.all()}
+        self._queue_counts = queue_counts
         nodes_base = self.config.nodes_base
         if not nodes_base.exists():
+            self._logger.debug("Nodes base %s does not exist; skipping", nodes_base)
+            self._update_queue_counts()
             return
         for node_dir in sorted(p for p in nodes_base.iterdir() if p.is_dir()):
+            self._logger.debug("Scanning node directory %s", node_dir)
             threads_dir = node_dir / "threads"
             self._process_thread_dir(threads_dir / "channels", "channel")
             self._process_thread_dir(threads_dir / "dms", "dm")
+        self._update_queue_counts()
+        self._logger.debug("Finished scan loop")
 
     def _process_thread_dir(self, base: Path, thread_type: str) -> None:
         if not base.exists():
+            self._logger.debug("Thread directory %s missing; skipping", base)
             return
+        self._logger.debug("Processing thread directory %s", base)
         for csv_path in sorted(p for p in base.glob("*.csv") if p.is_file()):
+            self._logger.debug("Processing thread file %s", csv_path)
             try:
                 self._process_thread_file(csv_path, thread_type)
             except Exception as exc:
                 self._logger.exception("Failed to process thread file %s: %s", csv_path, exc)
 
+    def _update_queue_counts(self) -> None:
+        if not self._queue_counts:
+            return
+        for persona in self.personas.all():
+            desired = self._queue_counts.get(persona.name, 0)
+            if desired != persona.runtime.queue_count:
+                self._logger.debug(
+                    "Updating queue count for persona=%s from %s to %s",
+                    persona.name,
+                    persona.runtime.queue_count,
+                    desired,
+                )
+                persona.runtime.queue_count = desired
+                persona.write_runtime()
+            else:
+                self._logger.debug(
+                    "Queue count unchanged for persona=%s (remaining at %s)",
+                    persona.name,
+                    desired,
+                )
+
     def _process_thread_file(self, path: Path, fallback_thread_type: str) -> None:
         self._csv.ensure_file(path, THREAD_HEADERS)
         rows = self._csv.read_rows(path)
         if not rows:
+            self._logger.debug("Thread file %s empty; nothing to process", path)
             return
+        modified = False
+        queued_reply_rows: List[Dict[str, str]] = []
         for idx, row in enumerate(rows):
             direction = (row.get("direction") or "").lower()
             if direction != "inbound":
+                self._logger.debug(
+                    "Skipping row %s direction=%s in %s",
+                    idx,
+                    direction or "",
+                    path,
+                )
                 continue
+            # Skip ignored public channels (by channel index in meta_json)
+            thread_type = (row.get("thread_type") or fallback_thread_type)
+            if thread_type == "channel":
+                try:
+                    meta = json.loads(row.get("meta_json") or "{}")
+                except json.JSONDecodeError:
+                    meta = {}
+                ch_index = meta.get("channel_index")
+                try:
+                    ch_index_int = int(ch_index) if ch_index is not None else None
+                except (TypeError, ValueError):
+                    ch_index_int = None
+                if ch_index_int is not None and ch_index_int in (self.config.ignore_channel_indexes or []):
+                    self._logger.info(
+                        "Ignoring inbound row %s on channel index %s due to configuration",
+                        idx,
+                        ch_index_int,
+                    )
+                    continue
             processed_flag = (row.get("processed") or "0").strip()
             if processed_flag and processed_flag != "0":
+                self._logger.debug(
+                    "Row %s already processed (flag=%s) in %s",
+                    idx,
+                    processed_flag,
+                    path,
+                )
                 continue
             message_id = self._message_id(path, row, idx)
             if self._already_replied(rows, message_id):
+                self._logger.debug(
+                    "Row %s message_id=%s already has a queued/outbound reply",
+                    idx,
+                    message_id,
+                )
                 continue
             match = self._detect_persona(row, fallback_thread_type)
             if not match:
+                self._logger.debug(
+                    "Row %s message_id=%s has no persona match; content preview=%r",
+                    idx,
+                    message_id,
+                    (row.get("content") or "")[:120],
+                )
                 continue
+            persona_name = match.persona.name
+            if persona_name not in self._queue_counts:
+                self._queue_counts[persona_name] = 0
             if match.command:
-                self._handle_control_command(path, row, message_id, match)
+                reply_rows = self._handle_control_command(path, row, message_id, match)
+                if reply_rows:
+                    queued_reply_rows.extend(reply_rows)
+                    self._logger.info(
+                        "Queued %d control replies for message_id=%s persona=%s",
+                        len(reply_rows),
+                        message_id,
+                        persona_name,
+                    )
+                row["processed"] = "1"
+                modified = True
                 continue
             # Future: LLM handling will go here.
+            self._queue_counts[persona_name] = self._queue_counts.get(persona_name, 0) + 1
+            self._logger.debug(
+                "Incremented queue count for persona=%s message_id=%s (total=%d)",
+                persona_name,
+                message_id,
+                self._queue_counts[persona_name],
+            )
+        if queued_reply_rows:
+            rows.extend(queued_reply_rows)
+            modified = True
+            self._logger.debug("Appended %d queued replies to %s", len(queued_reply_rows), path)
+        if modified:
+            self._csv.write_rows(path, THREAD_HEADERS, rows)
+            self._logger.info("Wrote updates to thread file %s", path)
+        else:
+            self._logger.debug("No modifications required for %s", path)
 
     def _message_id(self, path: Path, row: Dict[str, str], idx: int) -> str:
         message_id = row.get("message_id") or ""
         if message_id:
             return message_id
         payload = "|".join([path.stem, row.get("thread_key", ""), row.get("timestamp", ""), row.get("content", "")])
-        return uuid.uuid5(uuid.NAMESPACE_URL, payload).hex
+        ts_part = self._timestamp_from_row(row).strftime("%Y%m%d%H%M%S")
+        return f"gen_{path.stem}_{idx}_{ts_part}"
 
     @staticmethod
-    def _already_replied(rows: Sequence[Dict[str, str]], message_id: str) -> bool:
-        for candidate in rows:
-            if (candidate.get("reply_to_id") or "") == message_id:
-                if (candidate.get("direction") or "").lower() in {"queued", "outbound"}:
-                    return True
+    def _generate_reply_id() -> str:
+        """Generate a random 32-bit unsigned integer as a string for a new reply."""
+        return str(random.randint(0, 2**32 - 1))
+
+    @staticmethod
+    def _timestamp_from_row(row: Dict[str, str]) -> dt.datetime:
+        try:
+            ts = row.get("timestamp") or ""
+            if len(ts) >= 19:
+                return dt.datetime.fromisoformat(ts[:19])
+        except Exception:
+            pass
+        return dt.datetime.now(dt.timezone.utc)
+
+    @staticmethod
+    def _already_replied(rows: List[Dict[str, str]], source_message_id: str) -> bool:
+        """Check if a reply for the given source message ID already exists."""
+        for r in rows:
+            if r.get("reply_to_id") == source_message_id:
+                return True
         return False
 
     def _detect_persona(self, row: Dict[str, str], fallback_thread_type: str) -> Optional[PersonaMatch]:
-        content_raw = row.get("content") or ""
-        content = content_raw.strip()
+        """Detect which persona, if any, should respond to a message."""
+        content = (row.get("content") or "").strip()
         if not content:
             return None
-        tokens = content.split()
+        tokens = content.split(None, 2)
         if not tokens:
             return None
         first = tokens[0]
@@ -560,14 +741,14 @@ class AIAgent:
                 # Default persona reserved for non-control replies; not handled yet.
                 return None
             return None
-        remainder = content[len(first) :].lstrip()
-        if not remainder:
+        if len(tokens) == 1:
             return PersonaMatch(persona=persona, trigger=first, command=None, remainder="")
-        second_token = remainder.split(None, 1)[0]
-        rest = remainder[len(second_token) :].lstrip()
-        command = second_token.lower()
+        second = tokens[1]
+        command = second.lower()
         if command in CONTROL_COMMANDS:
-            return PersonaMatch(persona=persona, trigger=first, command=command, remainder=rest)
+            remainder = tokens[2] if len(tokens) > 2 else ""
+            return PersonaMatch(persona=persona, trigger=first, command=command, remainder=remainder)
+        remainder = " ".join(tokens[1:])
         return PersonaMatch(persona=persona, trigger=first, command=None, remainder=remainder)
 
     def _handle_control_command(
@@ -576,7 +757,7 @@ class AIAgent:
         source_row: Dict[str, str],
         source_message_id: str,
         match: PersonaMatch,
-    ) -> None:
+    ) -> List[Dict[str, str]]:
         now = dt.datetime.now(dt.timezone.utc)
         persona = match.persona
         persona.refresh_today(now)
@@ -584,18 +765,12 @@ class AIAgent:
         command = match.command or ""
         replies: List[Tuple[str, Dict[str, Any]]] = []
         if command == "start":
-            if persona.runtime.running:
-                message = f"{persona.name} already running."
-            else:
-                persona.mark_started(now)
-                message = f"{persona.name} running." if persona.runtime.last_started else f"{persona.name} started."
+            persona.mark_started(now)
+            message = f"{persona.name} is now running."
             replies.append((message, {"reply_type": "control", "control_command": command}))
         elif command == "stop":
-            if not persona.runtime.running:
-                message = f"{persona.name} already stopped."
-            else:
-                persona.mark_stopped()
-                message = f"{persona.name} stopped."
+            persona.mark_stopped()
+            message = f"{persona.name} is now stopped."
             replies.append((message, {"reply_type": "control", "control_command": command}))
         elif command == "status":
             summary = persona.status_summary(now)
@@ -625,12 +800,20 @@ class AIAgent:
             )
         else:
             self._logger.debug("Unhandled control command '%s' for persona %s", command, persona.name)
-            return
+            return []
         persona.write_runtime()
+        reply_rows: List[Dict[str, str]] = []
+        try:
+            source_meta = json.loads(source_row.get("meta_json") or "{}")
+        except json.JSONDecodeError:
+            source_meta = {}
         for reply in replies:
-            self._enqueue_reply(thread_path, source_row, source_message_id, persona, match, reply)
+            reply_rows.append(
+                self._build_reply_row(thread_path, source_row, source_message_id, persona, match, reply, source_meta)
+            )
+        return reply_rows
 
-    def _enqueue_reply(
+    def _build_reply_row(
         self,
         thread_path: Path,
         source_row: Dict[str, str],
@@ -638,15 +821,25 @@ class AIAgent:
         persona: Persona,
         match: PersonaMatch,
         reply: Tuple[str, Dict[str, Any]],
-    ) -> None:
+        source_meta: Dict[str, Any],
+    ) -> Dict[str, str]:
         content, meta = reply
         thread_type = (source_row.get("thread_type") or "").lower() or ("channel" if "channels" in thread_path.parts else "dm")
         thread_key = source_row.get("thread_key") or thread_path.stem
-        row = {
+        
+        final_meta = source_meta.copy()
+        final_meta.update({
+            "persona": persona.name,
+            "trigger": match.trigger,
+            "source_message_id": source_message_id,
+            **meta,
+        })
+
+        row: Dict[str, str] = {
             "processed": "0",
             "thread_type": thread_type,
             "thread_key": thread_key,
-            "message_id": uuid.uuid4().hex,
+            "message_id": self._generate_reply_id(),
             "direction": "queued",
             "sender_id": persona.name,
             "reply_to_id": source_message_id,
@@ -654,19 +847,15 @@ class AIAgent:
             "content": content,
             "send_attempts": "0",
             "send_status": "",
-            "meta_json": dump_meta(
-                {
-                    "persona": persona.name,
-                    "trigger": match.trigger,
-                    "source_message_id": source_message_id,
-                    **meta,
-                }
-            ),
+            "meta_json": dump_meta(final_meta),
         }
-        self._csv.append_row(thread_path, THREAD_HEADERS, row)
         self._logger.info(
-            "Queued control reply command=%s persona=%s thread=%s", meta.get("control_command"), persona.name, thread_key
+            "Prepared control reply command=%s persona=%s thread=%s",
+            meta.get("control_command"),
+            persona.name,
+            thread_key,
         )
+        return row
 
     @staticmethod
     def _split_config_chunks(persona_name: str, text: str, limit: int) -> List[str]:
