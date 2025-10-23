@@ -1,9 +1,7 @@
 # Meshtastic-LLM
 
 ## Styleguide References
-- `project-spec.md` – full technical specification plus CLI logging and CLI-first Python style requirements.
-- `project-roadmap.md` – granular task tracking with status legend per the styleguide.
-- `social-context.md` – organizational context, partnerships, and impact narrative.
+- `project-spec.md` – full technical specification plus CLI logging and CLI-first Python style requirements. granular task tracking with status legend per the styleguide, and organizational context, partnerships, and impact narrative.
 
 Read these documents before contributing so CLI, logging, and documentation stay consistent.
 
@@ -32,6 +30,12 @@ python -m pip install -r requirements.txt
 ```
 Both scripts install dependencies from `requirements.txt`, ensure Ollama/OpenWebUI containers are running, and then invoke `meshtastic-bridge.py` with `config/default.toml`.
 
+### Quick test run (no hardware required)
+```bash
+python meshtastic-bridge.py --test
+```
+This mode now reuses a single in-memory Meshtastic stub so the bridge exercises telemetry ingestion, DM logging, and outbound queue flushing without touching real devices. The command prints the temporary data path and log file when it exits.
+
 ### Direct CLI usage
 ```bash
 python meshtastic-bridge.py --config config/default.toml
@@ -57,7 +61,7 @@ tail -f logs/log.*.txt
 ```
 
 ## Test Mode
-Test mode (`--test`) uses an in-memory Meshtastic stub to simulate telemetry and text packets while storing all CSV output in a temporary directory. The command emits the location of the generated data and log file when it finishes, satisfying the styleguide requirement for non-destructive verification.
+Test mode (`--test`) uses a dedicated in-memory Meshtastic stub to simulate telemetry and text packets while storing all CSV output in a temporary directory. The command emits the location of the generated data and log file when it finishes, satisfying the styleguide requirement for non-destructive verification and making it suitable for CI smoke checks.
 
 ## Diagnostics and Prompts
 The `prompts/` directory remains append-only, containing `prompts.csv` plus per-prompt Markdown files (with YAML front matter) so the repository can be rendered by Jekyll/GitHub Pages for auditability.
@@ -65,7 +69,8 @@ The `prompts/` directory remains append-only, containing `prompts.csv` plus per-
 ## Current State & Next Steps
 - `meshtastic-bridge.py` handles inbound telemetry/messages, dedupes entries, and sends queued replies from CSVs. Listener scoping prevents cross-talk when more than one bridge is running.
 - CSV helpers hold per-file locks and append rows atomically, matching the project spec.
-- Work in progress: the `ai-agent.py` component, Ollama integration, serial port filtering via Meshtastic utility helpers, and end-to-end soak tests for crash-safe resume. See `project-spec.md` and the roadmap for details.
+- `--test` smoke mode verifies queue flushing and logging with deterministic fixtures, enabling automation without radios.
+- Active backlog items (AI agent, Ollama prompt assembly, extended status reporting) remain tracked in issue threads until a public roadmap is published.
 
 ## Troubleshooting
 - **No radio detected:** supply `--serial-port COMx` (Windows) or `/dev/ttyUSBx` (Linux) to bypass auto-detect, and confirm no other tool has the port open.

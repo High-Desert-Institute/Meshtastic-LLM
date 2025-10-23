@@ -129,8 +129,8 @@ Notes
 - Avoid overuse: per-thread cooldown to prevent flooding channels
 
 ### Triggers and context policy
-- DM threads: always respond to latest inbound message if not yet answered by AI
-- Channel threads: only respond when content begins with “librarian” (case-insensitive); strip the trigger word from the prompt
+- DM threads: always respond to latest inbound message if not yet answered by AI (using the default persona unless explicitly overridden with a trigger)
+- Channel threads: only respond when content begins with a recognized persona trigger (e.g., “librarian …”, “elmer …”, case-insensitive); strip the trigger word from the prompt
 - Context window assembly:
   - Include the most recent N messages (configurable) and the latest node metadata of the participants
   - Truncate to a character/token budget before calling the model
@@ -154,6 +154,59 @@ Use a small config file (YAML or TOML) and/or environment variables. Suggested k
 - ENABLE_PROMPT_LOGS (bool; default true)
 - NODES_BASE_DIR (default ./data/nodes)
 - NODE_UID_STRATEGY (auto|config); auto derives from device/node ID; config allows explicit mapping
+ - PERSONAS_DIR (default ./config/personas) — directory of persona configuration files (TOML)
+
+### Personas (configurable agents)
+
+Personas define named assistant profiles that the AI agent can invoke based on triggers in messages. Each persona is configured via a TOML file in `config/personas/` and includes:
+
+- name: Unique identifier that also serves as a channel trigger word (e.g., "librarian").
+- triggers: Optional list of trigger aliases (e.g., ["librarian", "lib"]).
+- description: Human-readable summary of the persona.
+- system_prompt: The base/system instructions for the assistant.
+- model: Preferred Ollama model for this persona (falls back to global defaults).
+- temperature: Generation temperature.
+- max_message_chars, max_context_chars: Optional overrides for persona-specific limits.
+- cooldown_seconds: Optional override for reply cooldown per thread.
+- rag: Boolean indicating whether this persona may use retrieval-augmented generation tools.
+- tools: Optional list of tool names or capabilities the persona may use (e.g., ["local_rag"]).
+- meta: Free-form metadata reserved for future features.
+
+Location and file format
+- Directory: `config/personas/`
+- File naming: `<name>.toml` (lowercase, sanitized)
+
+Example persona file (TOML):
+
+```toml
+name = "librarian"
+triggers = ["librarian", "lib"]
+description = "A concise research librarian who can use local RAG tools to answer complex questions."
+model = "qwen3-4b-q8-instruct"
+temperature = 0.2
+max_message_chars = 200
+max_context_chars = 1400
+cooldown_seconds = 30
+rag = true
+tools = ["local_rag"]
+
+system_prompt = """
+You are the Librarian: a concise, utility-first research assistant operating over a very low-bandwidth mesh.
+Answer only what's asked, keep replies short and actionable, and prefer bullet points.
+If you used retrieval, add a tiny 'sources:' section with 1–3 short citations.
+If the answer is uncertain, state what would be needed and suggest next steps.
+Never include secrets; avoid speculation.
+"""
+```
+
+Selection rules
+- Channel messages: A message that begins with a persona trigger (case-insensitive) selects that persona for a reply. The trigger word is stripped from the prompt that is sent to the model.
+- DM threads: The AI agent uses a default persona (configurable; default "librarian"). A DM can opt into a different persona by starting with a trigger word.
+- Allow/block lists and per-thread cooldowns still apply; persona settings may further restrict behavior.
+
+Initial personas
+- elmer: a helpful amateur radio mentor focused on Meshtastic and radio practice (no RAG).
+- librarian: a concise research librarian that can use local RAG tools for harder questions.
 
 ### Operational behavior
 - Startup
@@ -566,8 +619,16 @@ Legend:
   - [x] Serial port scan throttling and noise reduction between retries
   - [?] Crash-safe resume logic covering queued→outbound lifecycle (baseline implementation; needs soak testing)
   - [?] Adversarial code review
+- [ ] **personas**
+  - [x] Define persona config schema and directory: `config/personas/*.toml`
+  - [x] Add two initial personas: `librarian` (RAG-enabled) and `elmer` (ham radio mentor)
+  - [ ] Persona loader in AI agent with validation and helpful errors
+  - [ ] Trigger detection updated to match any configured persona trigger in channels; default persona for DMs
+  - [ ] Per-persona overrides for model, temperature, context limits, and cooldown
+  - [ ] Optional runtime reload of persona files (on file change)
+  - [ ] Unit tests for schema parsing, trigger matching, and selection logic
 - [ ] **`ai-agent.py` features**
-  - [ ] Trigger detection for DMs and “librarian …” channel messages with cooldowns
+  - [ ] Trigger detection for DMs and persona-triggered channel messages (e.g., “librarian …”, “elmer …”) with cooldowns
   - [ ] Context assembly respecting MAX_CONTEXT_CHARS and minimal system prompt
   - [ ] Ollama HTTP client with retries, model selection, and timing capture
   - [ ] Reply generation enforcing MAX_MESSAGE_CHARS and chunking queued rows
