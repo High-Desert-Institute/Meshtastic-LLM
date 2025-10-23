@@ -666,20 +666,18 @@ Legend:
   - [x] Global start/stop semantics across all nodes; concise confirmations
   - [x] Timezone handling: default to Los_Angeles; support IANA names; status timestamps and `today_calls` rollover use persona timezone
   - [ ] Unit tests: command parsing, persistence, stats rollover by UTC day, message chunking
-  - [ ] Docs: README section for persona commands and examples
-  - [ ] Precedence: ship these before AI reply features
+  - [x] Docs: README section for persona commands and examples
   - [x] Persona loader in AI agent with validation and helpful errors
-  - [?] Selection and fallback rules:
-    - Channel: If a message starts with a recognized persona trigger and is NOT a control command, select that persona and defer to the LLM path (Part 2). If no trigger, do not reply.
-  - [ ] Per-persona overrides for model, temperature, context limits, and cooldown
-  - [ ] Optional runtime reload of persona files (on file change)
+  - [?] Selection rules: extend DM default handling, enforce allow/block lists, and support multi-trigger aliases.
+  - [x] Per-persona overrides for model, temperature, context limits, and cooldown
+  - [x] Optional runtime reload of persona files (reload on each scan cycle)
   - [ ] Unit tests for schema parsing, trigger matching, and selection logic
-- [ ] **`ai-agent.py` ollama calls**
-  - [ ] LLM path is entered when selection layer chooses a persona (trigger present and not a control command in channels; default or trigger in DMs). Use persona config (model, temperature, limits, tools) for the call.
+- [?] **`ai-agent.py` ollama calls**
+  - [?] LLM path handles channel triggers; add default DM persona flow and richer source metadata
   - [ ] Context assembly respecting MAX_CONTEXT_CHARS and minimal system prompt
-  - [ ] Ollama HTTP client with retries, model selection, and timing capture
-  - [ ] Reply generation enforcing MAX_MESSAGE_CHARS and chunking queued rows
-  - [ ] Idempotent scanning loop that skips threads already answered
+  - [?] Ollama HTTP client with retries, model selection, and timing capture
+  - [x] Reply generation enforcing MAX_MESSAGE_CHARS and chunking queued rows
+  - [x] Idempotent scanning loop that skips threads already answered
 - [ ] **Shared infrastructure**
   - [x] Config file + env override loader; path bootstrap utilities
   - [x] CSV helpers for atomic append, advisory locks, and schema validation, incl. filename sanitization
@@ -692,7 +690,7 @@ Legend:
   - [x] Run supervision scripts (`start.ps1`/`start.sh`) to start/restart both services with logging
   - [ ] Optional Dockerfiles or packaging for the two Python services
 - [ ] **Documentation and rollout**
-  - [?] README updates for setup, configuration, troubleshooting, and CSV schemas (initial pass completed; expand troubleshooting)
+  - [x] README updates for setup, personas, configuration, troubleshooting, and CSV schemas
   - [ ] Prompts/data workflow documentation for operators and Jekyll consumers
   - [ ] Field dry-run with log review and tuning of message limits/cooldowns
   - [ ] Final polish: channel/DM allow/block lists and safety/call refusal patterns
