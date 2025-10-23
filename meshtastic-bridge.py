@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 try:
     from serial.serialutil import SerialException
@@ -56,6 +56,7 @@ SIGHTINGS_HEADERS = [
     "sighting_hash",
 ]
 THREAD_HEADERS = [
+    "processed",
     "thread_type",
     "thread_key",
     "message_id",
@@ -154,17 +155,22 @@ class CSVStore:
         path.parent.mkdir(parents=True, exist_ok=True)
 
     def ensure_file(self, path: Path, headers: Iterable[str]) -> None:
-        if path.exists():
-            return
+        headers_list = list(headers)
         self._ensure_parent(path)
         with FileLock(path):
             if path.exists():
+                with path.open("r", newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    existing_headers = reader.fieldnames or []
+                    rows = [dict(row) for row in reader]
+                if existing_headers == headers_list:
+                    return
+                normalized = [self._normalize_row(row, headers_list) for row in rows]
+                self._rewrite_locked(path, headers_list, normalized)
                 return
-            with tempfile.NamedTemporaryFile("w", newline="", delete=False, dir=str(path.parent)) as tmp:
-                writer = csv.writer(tmp)
-                writer.writerow(list(headers))
-                temp_path = Path(tmp.name)
-            temp_path.replace(path)
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(headers_list)
 
     def read_rows(self, path: Path) -> List[Dict[str, str]]:
         if not path.exists():
@@ -172,7 +178,13 @@ class CSVStore:
         with FileLock(path):
             with path.open("r", newline="", encoding="utf-8") as handle:
                 reader = csv.DictReader(handle)
-                return [dict(row) for row in reader]
+                fieldnames = reader.fieldnames or []
+                rows = [dict(row) for row in reader]
+        if "processed" in fieldnames:
+            for row in rows:
+                if not row.get("processed"):
+                    row["processed"] = "0"
+        return rows
 
     def write_rows(self, path: Path, headers: Iterable[str], rows: Iterable[Dict[str, Any]]) -> None:
         self._ensure_parent(path)
@@ -181,7 +193,7 @@ class CSVStore:
                 writer = csv.DictWriter(tmp, fieldnames=list(headers))
                 writer.writeheader()
                 for row in rows:
-                    writer.writerow({key: row.get(key, "") for key in writer.fieldnames})
+                    writer.writerow(self._normalize_row(row, writer.fieldnames))
                 temp_path = Path(tmp.name)
             temp_path.replace(path)
 
@@ -191,7 +203,28 @@ class CSVStore:
         with FileLock(path):
             with path.open("a", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=headers_list)
-                writer.writerow({key: row.get(key, "") for key in headers_list})
+                writer.writerow(self._normalize_row(row, headers_list))
+
+    @staticmethod
+    def _normalize_row(row: Dict[str, Any], headers: Sequence[str]) -> Dict[str, str]:
+        normalized: Dict[str, str] = {}
+        for key in headers:
+            value = row.get(key, "") if isinstance(row, dict) else ""
+            if key == "processed":
+                text = str(value).strip() if value is not None else ""
+                normalized[key] = text if text else "0"
+            else:
+                normalized[key] = "" if value is None else str(value)
+        return normalized
+
+    def _rewrite_locked(self, path: Path, headers: Sequence[str], rows: Iterable[Dict[str, Any]]) -> None:
+        with tempfile.NamedTemporaryFile("w", newline="", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
+            writer = csv.DictWriter(tmp, fieldnames=list(headers))
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(self._normalize_row(row, writer.fieldnames))
+            temp_path = Path(tmp.name)
+        temp_path.replace(path)
 
 
 def load_config(path: Path, env_prefix: str = DEFAULT_ENV_PREFIX) -> BridgeConfig:
@@ -774,6 +807,7 @@ class MeshtasticBridge:
             "raw_portnum": decoded.get("portnum"),
         }
         row = {
+            "processed": "0",
             "thread_type": thread_type,
             "thread_key": thread_key,
             "message_id": message_id,
@@ -1088,6 +1122,7 @@ def run_test_mode(bridge: MeshtasticBridge, interface: StubSerialInterface) -> N
         # Queue a dummy outbound message to exercise send flow
         if bridge._node_paths:
             queued_row = {
+                "processed": "0",
                 "thread_type": "dm",
                 "thread_key": "^meshPeer",
                 "message_id": str(uuid.uuid4()),

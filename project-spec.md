@@ -89,6 +89,7 @@ Deduplication rule for sightings
 - At most one row per node per calendar day, and only when the sighting_hash differs from the last stored for that node (i.e., something changed)
 
 3) threads/*.csv (for both channels and DMs)
+- processed (string; "0"=not processed, "1"=processed by AI agent)
 - thread_type (string; channel|dm)
 - thread_key (string; channel name or DM node_id)
 - message_id (string; mesh message ID if available; else a generated UUID)
@@ -646,19 +647,19 @@ Legend:
   - [x] Serial port scan throttling and noise reduction between retries
   - [?] Crash-safe resume logic covering queued→outbound lifecycle (baseline implementation; needs soak testing)
   - [?] Adversarial code review
-- [ ] **`ai-agent.py` personas**
+- [?] **`ai-agent.py` personas**
   - [x] Define persona config schema and directory: `config/personas/*.toml`
   - [x] Add two initial personas: `librarian` (RAG-enabled) and `elmer` (ham radio mentor)
-  - [ ] Non-LLM control commands: `<persona> stop|start|status|config|help` with immediate replies (no model calls)
-  - [ ] Persist runtime fields in persona TOML using atomic writes + advisory locks (`running`, `total_calls`, `today_calls`, `today_date`, `last_started`, `timezone`)
-  - [ ] Implement `config` response splitting by `max_message_chars` into multiple queued messages
-  - [ ] Global start/stop semantics across all nodes; concise confirmations
-  - [ ] Timezone handling: default to Los_Angeles; support IANA names; status timestamps and `today_calls` rollover use persona timezone
+  - [x] Non-LLM control commands: `<persona> stop|start|status|config|help` with immediate replies (no model calls)
+  - [x] Persist runtime fields in persona TOML using atomic writes + advisory locks (`running`, `total_calls`, `today_calls`, `today_date`, `last_started`, `timezone`)
+  - [x] Implement `config` response splitting by `max_message_chars` into multiple queued messages
+  - [x] Global start/stop semantics across all nodes; concise confirmations
+  - [x] Timezone handling: default to Los_Angeles; support IANA names; status timestamps and `today_calls` rollover use persona timezone
   - [ ] Unit tests: command parsing, persistence, stats rollover by UTC day, message chunking
   - [ ] Docs: README section for persona commands and examples
   - [ ] Precedence: ship these before AI reply features
-  - [ ] Persona loader in AI agent with validation and helpful errors
-  - [ ] Selection and fallback rules:
+  - [x] Persona loader in AI agent with validation and helpful errors
+  - [?] Selection and fallback rules:
     - Channel: If a message starts with a recognized persona trigger and is NOT a control command, select that persona and defer to the LLM path (Part 2). If no trigger, do not reply.
   - [ ] Per-persona overrides for model, temperature, context limits, and cooldown
   - [ ] Optional runtime reload of persona files (on file change)
