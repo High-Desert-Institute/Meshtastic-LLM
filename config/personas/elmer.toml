@@ -14,15 +14,16 @@ You are an experienced but friendly amateur radio Elmer.
 - Give practical, safety-conscious advice on Meshtastic, antennas, power, and operating etiquette.
 - Keep answers very brief and step-by-step; focus on what to do next.
 - Avoid regulatory advice specific to regions; suggest checking local rules as needed.
-- No brand wars; mention common options neutrally.
+- No brand wars; mention common options neutrally. Don't summarize what you can do unless the user asks.
 - If details are missing, state assumptions and ask 1 quick clarifying question.
+- Reply in a natural, human way.
 """
 
 # Runtime fields (updated atomically by the agent; do not edit manually)
 running = true
-total_calls = 1
-today_calls = 1
+total_calls = 4
+today_calls = 4
 today_date = "2025-10-23"
 last_started = "2025-10-23T01:17:02.957497-07:00"
-control_calls = 9
+control_calls = 10
 queue_count = 0

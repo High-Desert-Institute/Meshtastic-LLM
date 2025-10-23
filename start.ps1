@@ -33,22 +33,34 @@ if ($dockerAvailable) {
 
 $agentJob = $null
 try {
-    Write-Host "Starting ai-agent.py..."
+    Write-Host "Starting ai-agent.py loop..."
     $agentJob = Start-Job -Name "meshtastic-ai-agent" -ScriptBlock {
         param($pythonPath, $scriptPath, $configPath, $workingDir)
+        $ErrorActionPreference = "Stop"
         Set-Location $workingDir
-        & $pythonPath $scriptPath --config $configPath
+        while ($true) {
+            & $pythonPath $scriptPath --config $configPath
+            Write-Host "ai-agent.py exited; restarting in 5 seconds..."
+            Start-Sleep -Seconds 5
+        }
     } -ArgumentList $pythonCmd, $agentScript, $agentConfig, $rootDir
 
-    & $pythonCmd $bridgeScript --config $agentConfig
+    while ($true) {
+        & $pythonCmd $bridgeScript --config $agentConfig
+        Write-Host "meshtastic-bridge.py exited; restarting in 5 seconds..."
+        Start-Sleep -Seconds 5
+    }
 }
 finally {
     if ($agentJob -ne $null) {
         if ($agentJob.State -eq 'Running') {
             Write-Host "Stopping ai-agent job..."
-            Stop-Job $agentJob -Force | Out-Null
+            Stop-Job -Job $agentJob -ErrorAction SilentlyContinue | Out-Null
         }
-        Receive-Job $agentJob | Out-Null
+        if ($agentJob.State -ne 'Completed') {
+            Wait-Job -Job $agentJob -ErrorAction SilentlyContinue | Out-Null
+        }
+        Receive-Job $agentJob -ErrorAction SilentlyContinue | Out-Null
         Remove-Job $agentJob
     }
 }

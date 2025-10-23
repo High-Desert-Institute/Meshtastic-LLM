@@ -85,21 +85,40 @@ fi
 
 # Launch the AI agent in the background, ensure cleanup on exit
 AGENT_PID=0
+STOP_REQUESTED=0
+
 start_agent() {
 	echo "Starting ai-agent.py..."
-	"${PYTHON_BIN}" "${ROOT_DIR}/ai-agent.py" --config "${AGENT_CONFIG}" &
-	AGENT_PID=$!
+	while [ "${STOP_REQUESTED}" -eq 0 ]; do
+		"${PYTHON_BIN}" "${ROOT_DIR}/ai-agent.py" --config "${AGENT_CONFIG}" &
+		AGENT_PID=$!
+		wait "${AGENT_PID}"
+		if [ "${STOP_REQUESTED}" -eq 0 ]; then
+			echo "ai-agent.py exited; restarting in 5 seconds..."
+			sleep 5
+		fi
+	done
 }
 
-stop_agent() {
-	if [ "${AGENT_PID}" -ne 0 ]; then
+stop_all() {
+	STOP_REQUESTED=1
+	if [ "${AGENT_PID}" -ne 0 ] && kill -0 "${AGENT_PID}" 2>/dev/null; then
 		kill "${AGENT_PID}" 2>/dev/null || true
 		wait "${AGENT_PID}" 2>/dev/null || true
 	fi
 }
 
-start_agent
-trap stop_agent EXIT INT TERM
+trap stop_all EXIT INT TERM
 
-# Launch the Meshtastic bridge for local testing
-exec "${PYTHON_BIN}" "${ROOT_DIR}/meshtastic-bridge.py" --config "${AGENT_CONFIG}"
+start_agent &
+AGENT_LOOP_PID=$!
+
+while [ "${STOP_REQUESTED}" -eq 0 ]; do
+	"${PYTHON_BIN}" "${ROOT_DIR}/meshtastic-bridge.py" --config "${AGENT_CONFIG}"
+	if [ "${STOP_REQUESTED}" -eq 0 ]; then
+		echo "meshtastic-bridge.py exited; restarting in 5 seconds..."
+		sleep 5
+	fi
+done
+
+wait "${AGENT_LOOP_PID}" 2>/dev/null || true

@@ -76,8 +76,9 @@ The agent maintains a single LLM worker thread. Every matched message becomes a 
 ## AI Agent personas and control commands
 - Persona files live in `config/personas/*.toml` and include triggers, model overrides, message limits, temperature, and timezone.
 - Messages that start with a trigger word (e.g. `librarian …`, `elmer …`) route to that persona. Control commands (`start`, `stop`, `status`, `config`, `help`) execute immediately without an LLM call so you can manage personas even if Ollama is offline.
+- `status` replies now append an Ollama health line that reports whether the agent can reach the server and if all required models are available, downloading, or missing.
 - Runtime fields (`running`, `total_calls`, `today_calls`, `queue_count`, etc.) are stored back into the persona file with atomic writes, enabling REST-style observability from the filesystem.
-- LLM replies honour persona or global `max_message_chars`. Long answers are split into numbered chunks with metadata so the bridge can send them sequentially. All newline characters are escaped in CSV so round-tripping between the agent and bridge stays lossless.
+- LLM replies honour persona or global `max_message_chars`. Messages are prefixed with the persona name (and chunk progress when split), and long answers are divided into numbered chunks with metadata so the bridge can send them sequentially. All newline characters are escaped in CSV so round-tripping between the agent and bridge stays lossless.
 
 DM fallbacks and richer context assembly are still on the roadmap; today the agent responds to channel triggers only.
 

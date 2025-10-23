@@ -18,7 +18,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ollama import Client
 
@@ -642,6 +642,8 @@ class AIAgent:
         self._thread_reply_lock = threading.Lock()
         self._llm_queue: "queue.Queue[Optional[LLMTask]]" = queue.Queue()
         self._ollama_client: Optional[Client] = None
+        self._ollama_status_lock = threading.Lock()
+        self._ollama_status: Dict[str, Any] = {"connected": None, "models": {}}
         self._worker_stop_sent = threading.Event()
         self._llm_thread = threading.Thread(target=self._llm_worker, name="ollama-worker", daemon=True)
         self._llm_thread.start()
@@ -962,6 +964,95 @@ class AIAgent:
             self._queue_counts[persona_name] = new_value
         self._set_persona_queue_count(persona_name, new_value)
 
+    def _set_ollama_connected(self, value: Optional[bool]) -> None:
+        with self._ollama_status_lock:
+            self._ollama_status["connected"] = value
+
+    def _set_model_status(self, model_name: str, status: str) -> None:
+        if not model_name:
+            return
+        with self._ollama_status_lock:
+            models_obj = self._ollama_status.get("models")
+            if not isinstance(models_obj, dict):
+                models_obj = {}
+                self._ollama_status["models"] = models_obj
+            models_obj[model_name] = status
+
+    def _get_cached_ollama_status(self, required_models: Set[str]) -> Tuple[Optional[bool], Dict[str, str]]:
+        with self._ollama_status_lock:
+            connected = self._ollama_status.get("connected")
+            models_obj = self._ollama_status.get("models")
+            models_map = models_obj if isinstance(models_obj, dict) else {}
+            snapshot = {model: models_map.get(model, "unknown") for model in required_models}
+        return connected, snapshot
+
+    def _required_models_for_persona(self, persona: Persona) -> Set[str]:
+        models: Set[str] = set()
+        default_model = self.config.ollama_model_instruct
+        if default_model:
+            models.add(default_model)
+        if persona.model:
+            models.add(persona.model)
+        if self.config.ollama_model_think:
+            models.add(self.config.ollama_model_think)
+        return {model for model in models if model}
+
+    def _probe_ollama(self, required_models: Set[str]) -> Tuple[bool, Dict[str, str]]:
+        if not required_models:
+            return True, {}
+        try:
+            client = Client(host=self.config.ollama_base_url)
+            response = client.list()
+            available: Set[str] = set()
+            for entry in response.get("models", []):
+                name = entry.get("name") or entry.get("model") or ""
+                if not name:
+                    continue
+                available.add(name)
+                base = name.split(":", 1)[0]
+                if base:
+                    available.add(base)
+            result: Dict[str, str] = {}
+            for model in required_models:
+                result[model] = "available" if model in available else "missing"
+            return True, result
+        except Exception as exc:  # pragma: no cover - best effort probe
+            self._logger.debug("Ollama probe failed: %s", exc)
+            return False, {model: "unknown" for model in required_models}
+
+    def _ollama_status_snapshot(self, persona: Persona) -> Tuple[Set[str], Optional[bool], Dict[str, str]]:
+        required = self._required_models_for_persona(persona)
+        connected, statuses = self._get_cached_ollama_status(required)
+        needs_probe = connected is None or any(statuses.get(model, "unknown") in {"unknown", "missing", "error"} for model in required)
+        if needs_probe:
+            probe_connected, probe_statuses = self._probe_ollama(required)
+            self._set_ollama_connected(probe_connected)
+            for model, status in probe_statuses.items():
+                current = statuses.get(model)
+                if current == "downloading" and status in {"missing", "unknown"}:
+                    continue
+                self._set_model_status(model, status)
+            connected, statuses = self._get_cached_ollama_status(required)
+        return required, connected, statuses
+
+    def _ollama_status_line(self, persona: Persona) -> str:
+        required, connected, statuses = self._ollama_status_snapshot(persona)
+        if not required:
+            return "Ollama: not configured"
+        if not connected:
+            return "Ollama: offline | models unavailable"
+        downloading = sorted(model for model, status in statuses.items() if status == "downloading")
+        missing = sorted(model for model, status in statuses.items() if status in {"missing", "unknown", "error"})
+        if not downloading and not missing:
+            return "Ollama: connected | all required models ready"
+        parts: List[str] = []
+        if downloading:
+            parts.append("downloading " + ", ".join(downloading))
+        if missing:
+            parts.append("missing " + ", ".join(missing))
+        detail = "; ".join(parts) if parts else "status unknown"
+        return f"Ollama: connected | {detail}"
+
     def _llm_worker(self) -> None:
         client: Optional[Client] = None
         connected = False
@@ -998,6 +1089,7 @@ class AIAgent:
                     task.message_id,
                     exc,
                 )
+                self._set_ollama_connected(None)
             finally:
                 self._finish_task(task, success)
                 self._llm_queue.task_done()
@@ -1016,9 +1108,11 @@ class AIAgent:
             self._logger.info("Connecting to Ollama at %s", self.config.ollama_base_url)
             client.list()
             self._logger.info("Connected to Ollama")
+            self._set_ollama_connected(True)
             return True
         except Exception as exc:
             self._logger.error("Failed to connect to Ollama: %s", exc)
+            self._set_ollama_connected(False)
             return False
 
     def _ensure_model_available(self, client: Client, model_name: str) -> bool:
@@ -1034,8 +1128,10 @@ class AIAgent:
                     existing.add(base)
             if model_name in existing:
                 self._logger.info("Ollama model '%s' already present", model_name)
+                self._set_model_status(model_name, "available")
                 return True
             self._logger.info("Pulling Ollama model '%s'", model_name)
+            self._set_model_status(model_name, "downloading")
             last_status = None
             for chunk in client.pull(model_name, stream=True):
                 status = chunk.get("status")
@@ -1046,9 +1142,11 @@ class AIAgent:
                 if detail:
                     self._logger.debug("ollama pull %s detail: %s", model_name, detail)
             self._logger.info("Completed pull for model '%s'", model_name)
+            self._set_model_status(model_name, "available")
             return True
         except Exception as exc:
             self._logger.error("Failed to ensure model '%s': %s", model_name, exc)
+            self._set_model_status(model_name, "error")
             return False
 
     def _process_llm_task(self, task: LLMTask, client: Client) -> bool:
@@ -1261,7 +1359,9 @@ class AIAgent:
             replies.append((message, {"reply_type": "control", "control_command": command}))
         elif command == "status":
             summary = persona.status_summary(now)
-            replies.append((summary, {"reply_type": "control", "control_command": command}))
+            ollama_line = self._ollama_status_line(persona)
+            message = summary if not ollama_line else f"{summary}\n{ollama_line}"
+            replies.append((message, {"reply_type": "control", "control_command": command}))
         elif command == "config":
             config_text = persona.read_config_text().strip()
             max_chars = persona.max_message_chars or 200
@@ -1321,6 +1421,13 @@ class AIAgent:
             "source_message_id": source_message_id,
             **meta,
         })
+
+        chunk_total = int(final_meta.get("chunk_total", final_meta.get("chunk_count", 1)) or 1)
+        chunk_index = int(final_meta.get("chunk_index", 1) or 1)
+        prefix = persona.name
+        if chunk_total > 1:
+            prefix = f"{persona.name} ({chunk_index}/{chunk_total})"
+        content = f"{prefix}: {content}" if content else f"{prefix}:"
 
         row: Dict[str, str] = {
             "processed": "0",
