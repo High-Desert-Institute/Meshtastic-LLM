@@ -646,10 +646,10 @@ Legend:
   - [x] Serial port scan throttling and noise reduction between retries
   - [?] Crash-safe resume logic covering queued→outbound lifecycle (baseline implementation; needs soak testing)
   - [?] Adversarial code review
-- [ ] **personas**
+- [ ] **`ai-agent.py` personas**
   - [x] Define persona config schema and directory: `config/personas/*.toml`
   - [x] Add two initial personas: `librarian` (RAG-enabled) and `elmer` (ham radio mentor)
-  - [ ] Non-LLM control commands: `<persona> stop|start|status|config` with immediate replies (no model calls)
+  - [ ] Non-LLM control commands: `<persona> stop|start|status|config|help` with immediate replies (no model calls)
   - [ ] Persist runtime fields in persona TOML using atomic writes + advisory locks (`running`, `total_calls`, `today_calls`, `today_date`, `last_started`, `timezone`)
   - [ ] Implement `config` response splitting by `max_message_chars` into multiple queued messages
   - [ ] Global start/stop semantics across all nodes; concise confirmations
@@ -658,12 +658,13 @@ Legend:
   - [ ] Docs: README section for persona commands and examples
   - [ ] Precedence: ship these before AI reply features
   - [ ] Persona loader in AI agent with validation and helpful errors
-  - [ ] Trigger detection updated to match any configured persona trigger in channels; default persona for DMs
+  - [ ] Selection and fallback rules:
+    - Channel: If a message starts with a recognized persona trigger and is NOT a control command, select that persona and defer to the LLM path (Part 2). If no trigger, do not reply.
   - [ ] Per-persona overrides for model, temperature, context limits, and cooldown
   - [ ] Optional runtime reload of persona files (on file change)
   - [ ] Unit tests for schema parsing, trigger matching, and selection logic
-- [ ] **`ai-agent.py` features**
-  - [ ] Trigger detection for DMs and persona-triggered channel messages (e.g., “librarian …”, “elmer …”) with cooldowns
+- [ ] **`ai-agent.py` ollama calls**
+  - [ ] LLM path is entered when selection layer chooses a persona (trigger present and not a control command in channels; default or trigger in DMs). Use persona config (model, temperature, limits, tools) for the call.
   - [ ] Context assembly respecting MAX_CONTEXT_CHARS and minimal system prompt
   - [ ] Ollama HTTP client with retries, model selection, and timing capture
   - [ ] Reply generation enforcing MAX_MESSAGE_CHARS and chunking queued rows
