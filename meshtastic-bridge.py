@@ -154,6 +154,52 @@ class CSVStore:
     def _ensure_parent(path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _escape_field(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value)
+        if not text:
+            return ""
+        text = text.replace("\\", "\\\\")
+        text = text.replace("\r", "\\r")
+        text = text.replace("\n", "\\n")
+        return text
+
+    @staticmethod
+    def _unescape_field(value: Any) -> Any:
+        if not isinstance(value, str) or "\\" not in value:
+            return value
+        result: List[str] = []
+        i = 0
+        length = len(value)
+        while i < length:
+            char = value[i]
+            if char == "\\" and i + 1 < length:
+                nxt = value[i + 1]
+                if nxt == "n":
+                    result.append("\n")
+                    i += 2
+                    continue
+                if nxt == "r":
+                    result.append("\r")
+                    i += 2
+                    continue
+                if nxt == "\\":
+                    result.append("\\")
+                    i += 2
+                    continue
+            result.append(char)
+            i += 1
+        return "".join(result)
+
+    @classmethod
+    def _decode_row(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in list(row.items()):
+            if isinstance(value, str):
+                row[key] = cls._unescape_field(value)
+        return row
+
     def ensure_file(self, path: Path, headers: Iterable[str]) -> None:
         headers_list = list(headers)
         self._ensure_parent(path)
@@ -162,11 +208,10 @@ class CSVStore:
                 with path.open("r", newline="", encoding="utf-8") as handle:
                     reader = csv.DictReader(handle)
                     existing_headers = reader.fieldnames or []
-                    rows = [dict(row) for row in reader]
+                    rows = [self._decode_row(dict(row)) for row in reader]
                 if existing_headers == headers_list:
                     return
-                normalized = [self._normalize_row(row, headers_list) for row in rows]
-                self._rewrite_locked(path, headers_list, normalized)
+                self._rewrite_locked(path, headers_list, rows)
                 return
             with path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
@@ -179,7 +224,7 @@ class CSVStore:
             with path.open("r", newline="", encoding="utf-8") as handle:
                 reader = csv.DictReader(handle)
                 fieldnames = reader.fieldnames or []
-                rows = [dict(row) for row in reader]
+                rows = [self._decode_row(dict(row)) for row in reader]
         if "processed" in fieldnames:
             for row in rows:
                 if not row.get("processed"):
@@ -214,7 +259,7 @@ class CSVStore:
                 text = str(value).strip() if value is not None else ""
                 normalized[key] = text if text else "0"
             else:
-                normalized[key] = "" if value is None else str(value)
+                normalized[key] = CSVStore._escape_field(value)
         return normalized
 
     def _rewrite_locked(self, path: Path, headers: Sequence[str], rows: Iterable[Dict[str, Any]]) -> None:
