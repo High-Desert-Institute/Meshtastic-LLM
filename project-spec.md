@@ -92,10 +92,13 @@ Deduplication rule for sightings
 - processed (string; "0"=not processed, "1"=processed by AI agent)
 - thread_type (string; channel|dm)
 - thread_key (string; channel name or DM node_id)
-- message_id (string; mesh message ID if available; else a generated UUID)
+- message_id (string)
+  - inbound: the radio-provided message ID when available; otherwise a generated fallback (e.g., UUID)
+  - outbound (queued by AI): SHOULD be a base-10 string representing a 32-bit unsigned integer (0..4294967295) to align with Meshtastic ID conventions
 - direction (string; inbound|queued|outbound)
 - sender_id (string)
 - reply_to_id (string; optional; empty if not a reply)
+  - When present, MUST be a base-10 integer string (uint32 range) because the Meshtastic API expects an integer replyId. The bridge will validate/cast this to int on send.
 - timestamp (ISO 8601 UTC)
 - content (string; plain text message)
 - send_attempts (int; default 0)
@@ -128,6 +131,9 @@ Notes
 - Optional chunking: If necessary, split long replies into multiple queued rows, each within the character cap, and include sequence markers in content or meta_json
 - No sensitive or personal data beyond what is present in the thread context
 - Avoid overuse: per-thread cooldown to prevent flooding channels
+- Reply threading rules:
+  - AI-generated queued rows must set reply_to_id to the numeric (base-10) ID of the source inbound message when replying; the bridge will cast this to int for the Meshtastic send API.
+  - For consistency on mesh UIs, AI-generated outbound message_id values SHOULD be random uint32 IDs encoded as base-10 strings.
 
 ### Triggers and context policy
 - DM threads: always respond to latest inbound message if not yet answered by AI (using the default persona unless explicitly overridden with a trigger)
@@ -247,7 +253,7 @@ Ordering and independence
   - On restart, bridge scans for queued items and resumes sending; AI resumes scanning from last seen timestamp
   - The prompts registry is append-only; repeated AI attempts for the same inbound should either: (a) be deduped via source_message_id, or (b) create a new prompt_id with reason annotated in meta_json
  - Multi-node operation
-   - The bridge runs one process per attached node, or a single process multiplexing ports; in either case, each instance writes exclusively under nodes/<node_uid>/
+     - The bridge runs one thread per detected serial port within a single process (auto-detect), or can be constrained to a specific port via CLI; in all cases, each instance writes exclusively under nodes/<node_uid>/
    - The AI agent can process across all nodes by scanning nodes/*/threads/ trees; per-thread cooldown is enforced independently per node
 
 ### Error handling and resiliency
@@ -282,6 +288,7 @@ Ordering and independence
 - Reliable deduplication of sightings (daily per node, only when changed)
 - AI consistently replies to DMs and to “librarian …” messages only
 - Replies respect character limits, get queued, and are then sent by the bridge
+- Reply ID compatibility: queued replies use numeric reply_to_id and send successfully without type errors; bridge converts reply_to_id to int and honors retry/backoff on failures
 - Prompts directory exists with a stable CSV schema and Markdown files containing YAML front matter; content is Jekyll-renderable
 - Supports multiple attached nodes concurrently with isolated per-node data directories and no cross-node interference
 
@@ -646,6 +653,8 @@ Legend:
   - [x] Outbound queue monitor that marks rows outbound or backs off on failure
   - [x] PubSub listener scoping so each bridge only handles its own interface
   - [x] Serial port scan throttling and noise reduction between retries
+  - [x] Multi-port support: auto-detect and spawn one bridge thread per detected serial port
+  - [x] Reply threading compatibility: cast reply_to_id to int at send time; tolerate only base-10 uint32 strings in queued rows
   - [?] Crash-safe resume logic covering queued→outbound lifecycle (baseline implementation; needs soak testing)
   - [?] Adversarial code review
 - [?] **`ai-agent.py` personas**
@@ -676,10 +685,11 @@ Legend:
   - [x] CSV helpers for atomic append, advisory locks, and schema validation, incl. filename sanitization
   - [?] Observability: structured logging, essential counters, optional metrics endpoint (basic logging in place)
   - [?] Error handling hardening for corrupt CSVs, partial writes, disk-full scenarios (core patterns implemented; more guards needed)
+  - [x] ID format compliance across components (uint32 message_id recommendation for outbound; numeric reply_to_id enforced by bridge)
   - [ ] Serial port filtering via `meshtastic.util` helpers to avoid probing unrelated devices
   - [ ] End-to-end integration checks to prevent duplicate sends across restarts
   - [ ] Test suite covering unit cases, Meshtastic mock, Ollama stub, and prompt golden files
-  - [x] Run supervision scripts (e.g., `run.sh`) to start/restart both services with logging
+  - [x] Run supervision scripts (`start.ps1`/`start.sh`) to start/restart both services with logging
   - [ ] Optional Dockerfiles or packaging for the two Python services
 - [ ] **Documentation and rollout**
   - [?] README updates for setup, configuration, troubleshooting, and CSV schemas (initial pass completed; expand troubleshooting)

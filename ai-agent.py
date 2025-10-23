@@ -9,14 +9,18 @@ import datetime as dt
 import json
 import logging
 import os
+import queue
 import random
+import re
 import tempfile
 import threading
 import time
-import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from ollama import Client
 
 try:
     import tomllib
@@ -76,6 +80,13 @@ class AgentConfig:
     env_prefix: str
     default_persona: str
     ignore_channel_indexes: List[int]
+    max_message_chars: int
+    max_context_chars: int
+    reply_cooldown_seconds: int
+    enable_prompt_logs: bool
+    ollama_base_url: str
+    ollama_model_instruct: str
+    ollama_model_think: Optional[str]
     log_file: Optional[Path] = None
 
 
@@ -254,6 +265,15 @@ def load_config(path: Path, env_prefix: str = DEFAULT_ENV_PREFIX) -> AgentConfig
     ignore_default = ai_cfg.get("ignore_channel_indexes", [0])
     override_ignore = overrides.get("ai.ignore_channel_indexes")
     ignore_channel_indexes = _parse_int_list(override_ignore) if override_ignore is not None else _ensure_int_list(ignore_default)
+    max_message_chars = int(overrides.get("ai.max_message_chars", ai_cfg.get("max_message_chars", 200)))
+    max_context_chars = int(overrides.get("ai.max_context_chars", ai_cfg.get("max_context_chars", 2000)))
+    reply_cooldown_seconds = int(overrides.get("ai.reply_cooldown_seconds", ai_cfg.get("reply_cooldown_seconds", 120)))
+    enable_prompt_logs = bool(str(overrides.get("ai.enable_prompt_logs", ai_cfg.get("enable_prompt_logs", True))).lower() not in {"0", "false", "no"})
+
+    ollama_cfg = raw.get("ollama", {})
+    ollama_base_url = overrides.get("ollama.base_url", ollama_cfg.get("base_url", "http://localhost:11434"))
+    ollama_model_instruct = overrides.get("ollama.model_instruct", ollama_cfg.get("model_instruct", "qwen3-4b-q8-instruct"))
+    ollama_model_think = overrides.get("ollama.model_think", ollama_cfg.get("model_think")) or None
 
     return AgentConfig(
         data_root=data_root,
@@ -266,6 +286,13 @@ def load_config(path: Path, env_prefix: str = DEFAULT_ENV_PREFIX) -> AgentConfig
         env_prefix=prefix,
         default_persona=default_persona,
         ignore_channel_indexes=ignore_channel_indexes,
+        max_message_chars=max_message_chars,
+        max_context_chars=max_context_chars,
+        reply_cooldown_seconds=reply_cooldown_seconds,
+        enable_prompt_logs=enable_prompt_logs,
+        ollama_base_url=ollama_base_url,
+        ollama_model_instruct=ollama_model_instruct,
+        ollama_model_think=ollama_model_think,
     )
 
 
@@ -325,6 +352,34 @@ class PersonaMatch:
     remainder: str
 
 
+@dataclass
+class PersonaSnapshot:
+    name: str
+    system_prompt: str
+    model: Optional[str]
+    temperature: Optional[float]
+    max_message_chars: int
+    max_context_chars: int
+    cooldown_seconds: int
+    allow_channels: Optional[List[int]]
+    block_channels: Optional[List[int]]
+
+
+@dataclass
+class LLMTask:
+    thread_path: Path
+    thread_type: str
+    thread_key: str
+    message_id: str
+    sender_id: str
+    prompt_text: str
+    trigger: str
+    persona_snapshot: PersonaSnapshot
+    source_meta: Dict[str, Any]
+    timestamp: str
+    source_row: Dict[str, str]
+
+
 class Persona:
     def __init__(
         self,
@@ -342,16 +397,35 @@ class Persona:
         self.timezone = doc.get("timezone", "America/Los_Angeles")
         self.description = doc.get("description", "")
         self.model = doc.get("model")
-        self.temperature = doc.get("temperature")
+        temp_raw = doc.get("temperature")
+        try:
+            self.temperature = float(temp_raw) if temp_raw is not None else None
+        except (TypeError, ValueError):
+            self.temperature = None
         self.max_message_chars = int(doc.get("max_message_chars", 0) or 0)
         self.max_context_chars = int(doc.get("max_context_chars", 0) or 0)
         self.cooldown_seconds = int(doc.get("cooldown_seconds", 0) or 0)
         self.rag = bool(doc.get("rag", False))
         self.tools = list(doc.get("tools", []))
         self.system_prompt = doc.get("system_prompt", "")
+        self.allow_channels = _ensure_int_list(doc.get("allow_channels")) if doc.get("allow_channels") is not None else None
+        self.block_channels = _ensure_int_list(doc.get("block_channels")) if doc.get("block_channels") is not None else None
         self.runtime = runtime
         self._head_text = head_text
         self._comment_line = (comment_line or "# Runtime fields (updated atomically by the agent; do not edit manually)").rstrip("\n")
+
+    def to_snapshot(self) -> PersonaSnapshot:
+        return PersonaSnapshot(
+            name=self.name,
+            system_prompt=(self.system_prompt or "").strip(),
+            model=self.model,
+            temperature=self.temperature,
+            max_message_chars=self.max_message_chars,
+            max_context_chars=self.max_context_chars,
+            cooldown_seconds=self.cooldown_seconds,
+            allow_channels=list(self.allow_channels) if self.allow_channels is not None else None,
+            block_channels=list(self.block_channels) if self.block_channels is not None else None,
+        )
 
     @property
     def triggers_lower(self) -> List[str]:
@@ -513,9 +587,20 @@ class AIAgent:
         self._logger.setLevel(logging.DEBUG)
         self._configure_logging()
         self._csv = CSVStore(self._logger)
+        self._persona_lock = threading.Lock()
         self.personas = PersonaRegistry(config.personas_dir, self._logger, config.default_persona)
         self._logger.info("AI agent configured with nodes base %s", self.config.nodes_base)
-        self._queue_counts: Dict[str, int] = {}
+        self._queue_counts: Dict[str, int] = defaultdict(int)
+        self._queue_lock = threading.Lock()
+        self._inflight: set[Tuple[str, str]] = set()
+        self._inflight_lock = threading.Lock()
+        self._thread_last_reply: Dict[Tuple[str, str, str], float] = {}
+        self._thread_reply_lock = threading.Lock()
+        self._llm_queue: "queue.Queue[Optional[LLMTask]]" = queue.Queue()
+        self._ollama_client: Optional[Client] = None
+        self._worker_stop_sent = threading.Event()
+        self._llm_thread = threading.Thread(target=self._llm_worker, name="ollama-worker", daemon=True)
+        self._llm_thread.start()
 
     def _configure_logging(self) -> None:
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -541,28 +626,36 @@ class AIAgent:
         except KeyboardInterrupt:
             self._logger.info("Interrupted; shutting down")
         finally:
+            self.stop()
             self._logger.info("AI agent stopped")
 
     def stop(self) -> None:
+        already_set = self._stop_event.is_set()
         self._stop_event.set()
+        if not self._worker_stop_sent.is_set():
+            self._llm_queue.put(None)
+            self._worker_stop_sent.set()
+        if not already_set and self._llm_thread.is_alive():
+            self._llm_thread.join(timeout=10.0)
+        elif self._worker_stop_sent.is_set() and self._llm_thread.is_alive():
+            self._llm_thread.join(timeout=10.0)
 
     def scan_once(self) -> None:
         self._logger.debug("Starting scan loop")
-        self.personas.reload()
-        self._logger.debug("Loaded %d personas", len(self.personas.all()))
-        queue_counts = {persona.name: 0 for persona in self.personas.all()}
-        self._queue_counts = queue_counts
+        with self._persona_lock:
+            self.personas.reload()
+            personas_snapshot = list(self.personas.all())
+            self._logger.debug("Loaded %d personas", len(personas_snapshot))
+            self._sync_queue_counts_locked(personas_snapshot)
         nodes_base = self.config.nodes_base
         if not nodes_base.exists():
             self._logger.debug("Nodes base %s does not exist; skipping", nodes_base)
-            self._update_queue_counts()
             return
         for node_dir in sorted(p for p in nodes_base.iterdir() if p.is_dir()):
             self._logger.debug("Scanning node directory %s", node_dir)
             threads_dir = node_dir / "threads"
             self._process_thread_dir(threads_dir / "channels", "channel")
             self._process_thread_dir(threads_dir / "dms", "dm")
-        self._update_queue_counts()
         self._logger.debug("Finished scan loop")
 
     def _process_thread_dir(self, base: Path, thread_type: str) -> None:
@@ -576,27 +669,6 @@ class AIAgent:
                 self._process_thread_file(csv_path, thread_type)
             except Exception as exc:
                 self._logger.exception("Failed to process thread file %s: %s", csv_path, exc)
-
-    def _update_queue_counts(self) -> None:
-        if not self._queue_counts:
-            return
-        for persona in self.personas.all():
-            desired = self._queue_counts.get(persona.name, 0)
-            if desired != persona.runtime.queue_count:
-                self._logger.debug(
-                    "Updating queue count for persona=%s from %s to %s",
-                    persona.name,
-                    persona.runtime.queue_count,
-                    desired,
-                )
-                persona.runtime.queue_count = desired
-                persona.write_runtime()
-            else:
-                self._logger.debug(
-                    "Queue count unchanged for persona=%s (remaining at %s)",
-                    persona.name,
-                    desired,
-                )
 
     def _process_thread_file(self, path: Path, fallback_thread_type: str) -> None:
         self._csv.ensure_file(path, THREAD_HEADERS)
@@ -616,23 +688,20 @@ class AIAgent:
                     path,
                 )
                 continue
-            # Skip ignored public channels (by channel index in meta_json)
             thread_type = (row.get("thread_type") or fallback_thread_type)
+            thread_key = row.get("thread_key") or path.stem
+            try:
+                source_meta = json.loads(row.get("meta_json") or "{}")
+            except json.JSONDecodeError:
+                source_meta = {}
+            channel_index = None
             if thread_type == "channel":
-                try:
-                    meta = json.loads(row.get("meta_json") or "{}")
-                except json.JSONDecodeError:
-                    meta = {}
-                ch_index = meta.get("channel_index")
-                try:
-                    ch_index_int = int(ch_index) if ch_index is not None else None
-                except (TypeError, ValueError):
-                    ch_index_int = None
-                if ch_index_int is not None and ch_index_int in (self.config.ignore_channel_indexes or []):
+                channel_index = self._safe_int(source_meta.get("channel_index"))
+                if channel_index is not None and channel_index in (self.config.ignore_channel_indexes or []):
                     self._logger.info(
                         "Ignoring inbound row %s on channel index %s due to configuration",
                         idx,
-                        ch_index_int,
+                        channel_index,
                     )
                     continue
             processed_flag = (row.get("processed") or "0").strip()
@@ -662,8 +731,6 @@ class AIAgent:
                 )
                 continue
             persona_name = match.persona.name
-            if persona_name not in self._queue_counts:
-                self._queue_counts[persona_name] = 0
             if match.command:
                 reply_rows = self._handle_control_command(path, row, message_id, match)
                 if reply_rows:
@@ -677,14 +744,46 @@ class AIAgent:
                 row["processed"] = "1"
                 modified = True
                 continue
-            # Future: LLM handling will go here.
-            self._queue_counts[persona_name] = self._queue_counts.get(persona_name, 0) + 1
-            self._logger.debug(
-                "Incremented queue count for persona=%s message_id=%s (total=%d)",
-                persona_name,
+            prompt_text = match.remainder.strip()
+            if not prompt_text:
+                prompt_text = (row.get("content") or "").strip()
+            if not prompt_text:
+                self._logger.debug(
+                    "Skipping row %s message_id=%s due to empty prompt after trigger removal",
+                    idx,
+                    message_id,
+                )
+                continue
+            if not self._persona_allows_message(match.persona, thread_type, thread_key, channel_index):
+                self._logger.debug(
+                    "Persona %s not eligible to reply on thread %s (channel_index=%s)",
+                    persona_name,
+                    thread_key,
+                    channel_index,
+                )
+                continue
+            if self._enqueue_llm_task(
+                path,
+                thread_type,
+                thread_key,
                 message_id,
-                self._queue_counts[persona_name],
-            )
+                row,
+                match,
+                source_meta,
+                prompt_text,
+            ):
+                self._logger.info(
+                    "Queued LLM reply for message_id=%s persona=%s thread=%s",
+                    message_id,
+                    persona_name,
+                    thread_key,
+                )
+            else:
+                self._logger.debug(
+                    "Skipping LLM queue for message_id=%s persona=%s (already pending)",
+                    message_id,
+                    persona_name,
+                )
         if queued_reply_rows:
             rows.extend(queued_reply_rows)
             modified = True
@@ -694,6 +793,340 @@ class AIAgent:
             self._logger.info("Wrote updates to thread file %s", path)
         else:
             self._logger.debug("No modifications required for %s", path)
+
+    def _persona_allows_message(
+        self,
+        persona: Persona,
+        thread_type: str,
+        thread_key: str,
+        channel_index: Optional[int],
+    ) -> bool:
+        if not persona.runtime.running:
+            return False
+        if thread_type == "channel":
+            if persona.allow_channels is not None and channel_index is not None and channel_index not in persona.allow_channels:
+                return False
+            if persona.block_channels is not None and channel_index is not None and channel_index in persona.block_channels:
+                return False
+        cooldown = persona.cooldown_seconds or self.config.reply_cooldown_seconds
+        if cooldown > 0:
+            key = (persona.name, thread_type, thread_key)
+            with self._thread_reply_lock:
+                last_ts = self._thread_last_reply.get(key)
+            if last_ts and (time.time() - last_ts) < cooldown:
+                return False
+        return True
+
+    def _enqueue_llm_task(
+        self,
+        thread_path: Path,
+        thread_type: str,
+        thread_key: str,
+        message_id: str,
+        row: Dict[str, str],
+        match: PersonaMatch,
+        source_meta: Dict[str, Any],
+        prompt_text: str,
+    ) -> bool:
+        task_key = self._task_key(thread_path, message_id)
+        with self._inflight_lock:
+            if task_key in self._inflight:
+                return False
+            self._inflight.add(task_key)
+        snapshot = match.persona.to_snapshot()
+        task = LLMTask(
+            thread_path=thread_path,
+            thread_type=thread_type,
+            thread_key=thread_key,
+            message_id=message_id,
+            sender_id=row.get("sender_id") or "",
+            prompt_text=prompt_text,
+            trigger=match.trigger,
+            persona_snapshot=snapshot,
+            source_meta=source_meta,
+            timestamp=row.get("timestamp") or iso_now(),
+            source_row=dict(row),
+        )
+        self._llm_queue.put(task)
+        self._increment_queue_count(snapshot.name)
+        return True
+
+    def _task_key(self, thread_path: Path, message_id: str) -> Tuple[str, str]:
+        return (str(thread_path.resolve()), message_id)
+
+    def _record_thread_reply(self, persona_name: str, thread_type: str, thread_key: str) -> None:
+        with self._thread_reply_lock:
+            self._thread_last_reply[(persona_name, thread_type, thread_key)] = time.time()
+
+    @staticmethod
+    def _strip_think_blocks(text: str) -> str:
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    @staticmethod
+    def _chunk_response(text: str, limit: int) -> List[str]:
+        limit = max(1, limit)
+        remaining = text.strip()
+        chunks: List[str] = []
+        while remaining:
+            if len(remaining) <= limit:
+                chunks.append(remaining)
+                break
+            split_pos = remaining.rfind(" ", 0, limit + 1)
+            if split_pos <= 0:
+                split_pos = limit
+            chunk = remaining[:split_pos].rstrip()
+            if not chunk:
+                chunk = remaining[:limit].rstrip()
+            chunks.append(chunk)
+            remaining = remaining[len(chunk) :].lstrip()
+        return chunks
+
+    def _sync_queue_counts_locked(self, personas: Sequence[Persona]) -> None:
+        names = {persona.name for persona in personas}
+        with self._queue_lock:
+            for persona in personas:
+                self._queue_counts.setdefault(persona.name, 0)
+            for name in list(self._queue_counts.keys()):
+                if name not in names:
+                    del self._queue_counts[name]
+            snapshot_counts = {name: self._queue_counts.get(name, 0) for name in names}
+        for persona in personas:
+            desired = snapshot_counts.get(persona.name, 0)
+            if persona.runtime.queue_count != desired:
+                persona.runtime.queue_count = desired
+                persona.write_runtime()
+
+    def _set_persona_queue_count(self, persona_name: str, value: int) -> None:
+        with self._persona_lock:
+            persona = self.personas.get_by_name(persona_name)
+            if persona is None:
+                return
+            if persona.runtime.queue_count != value:
+                persona.runtime.queue_count = value
+                persona.write_runtime()
+
+    def _increment_queue_count(self, persona_name: str) -> None:
+        with self._queue_lock:
+            new_value = self._queue_counts.get(persona_name, 0) + 1
+            self._queue_counts[persona_name] = new_value
+        self._set_persona_queue_count(persona_name, new_value)
+
+    def _decrement_queue_count(self, persona_name: str) -> None:
+        with self._queue_lock:
+            current = self._queue_counts.get(persona_name, 0)
+            new_value = current - 1 if current > 0 else 0
+            self._queue_counts[persona_name] = new_value
+        self._set_persona_queue_count(persona_name, new_value)
+
+    def _llm_worker(self) -> None:
+        client: Optional[Client] = None
+        connected = False
+        validated_models: set[str] = set()
+        while True:
+            try:
+                task = self._llm_queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._stop_event.is_set() and self._worker_stop_sent.is_set():
+                    break
+                continue
+            if task is None:
+                self._llm_queue.task_done()
+                break
+            success = False
+            try:
+                if client is None:
+                    client = Client(host=self.config.ollama_base_url)
+                if not connected:
+                    connected = self._validate_ollama_connection(client)
+                if not connected:
+                    raise RuntimeError("Unable to connect to Ollama server")
+                model_name = task.persona_snapshot.model or self.config.ollama_model_instruct
+                if model_name and model_name not in validated_models:
+                    if self._ensure_model_available(client, model_name):
+                        validated_models.add(model_name)
+                    else:
+                        raise RuntimeError(f"Model '{model_name}' not available")
+                success = self._process_llm_task(task, client)
+            except Exception as exc:  # pragma: no cover - best effort logging
+                self._logger.exception(
+                    "LLM task failed for persona=%s message=%s: %s",
+                    task.persona_snapshot.name,
+                    task.message_id,
+                    exc,
+                )
+            finally:
+                self._finish_task(task, success)
+                self._llm_queue.task_done()
+        self._logger.debug("LLM worker exiting")
+
+    def _finish_task(self, task: LLMTask, success: bool) -> None:
+        key = self._task_key(task.thread_path, task.message_id)
+        with self._inflight_lock:
+            self._inflight.discard(key)
+        self._decrement_queue_count(task.persona_snapshot.name)
+        if success:
+            self._record_thread_reply(task.persona_snapshot.name, task.thread_type, task.thread_key)
+
+    def _validate_ollama_connection(self, client: Client) -> bool:
+        try:
+            self._logger.info("Connecting to Ollama at %s", self.config.ollama_base_url)
+            client.list()
+            self._logger.info("Connected to Ollama")
+            return True
+        except Exception as exc:
+            self._logger.error("Failed to connect to Ollama: %s", exc)
+            return False
+
+    def _ensure_model_available(self, client: Client, model_name: str) -> bool:
+        try:
+            self._logger.info("Validating Ollama model '%s'", model_name)
+            list_response = client.list()
+            existing: set[str] = set()
+            for model in list_response.get("models", []):
+                name = model.get("name") or model.get("model") or ""
+                if name:
+                    existing.add(name)
+                    base = name.split(":", 1)[0]
+                    existing.add(base)
+            if model_name in existing:
+                self._logger.info("Ollama model '%s' already present", model_name)
+                return True
+            self._logger.info("Pulling Ollama model '%s'", model_name)
+            last_status = None
+            for chunk in client.pull(model_name, stream=True):
+                status = chunk.get("status")
+                if status and status != last_status:
+                    self._logger.info("ollama pull %s: %s", model_name, status)
+                    last_status = status
+                detail = chunk.get("detail")
+                if detail:
+                    self._logger.debug("ollama pull %s detail: %s", model_name, detail)
+            self._logger.info("Completed pull for model '%s'", model_name)
+            return True
+        except Exception as exc:
+            self._logger.error("Failed to ensure model '%s': %s", model_name, exc)
+            return False
+
+    def _process_llm_task(self, task: LLMTask, client: Client) -> bool:
+        with self._persona_lock:
+            persona = self.personas.get_by_name(task.persona_snapshot.name)
+            if persona is None:
+                self._logger.warning(
+                    "Persona %s missing while processing message %s",
+                    task.persona_snapshot.name,
+                    task.message_id,
+                )
+                return False
+            persona_running = persona.runtime.running
+        if not persona_running:
+            self._logger.info(
+                "Persona %s is stopped; postponing message %s",
+                task.persona_snapshot.name,
+                task.message_id,
+            )
+            return False
+        model = task.persona_snapshot.model or self.config.ollama_model_instruct
+        if not model:
+            self._logger.error("No Ollama model configured for persona %s", task.persona_snapshot.name)
+            return False
+        options: Dict[str, Any] = {}
+        if task.persona_snapshot.temperature is not None:
+            options["temperature"] = task.persona_snapshot.temperature
+        start_ts = time.time()
+        result = client.generate(
+            model=model,
+            prompt=task.prompt_text,
+            system=task.persona_snapshot.system_prompt or None,
+            options=options or None,
+            stream=False,
+        )
+        response_text = (result.get("response") or "").strip()
+        if not response_text:
+            self._logger.warning(
+                "Empty response from Ollama for persona %s message %s",
+                task.persona_snapshot.name,
+                task.message_id,
+            )
+            return False
+        response_text = self._strip_think_blocks(response_text)
+        if not response_text:
+            self._logger.warning(
+                "Response from Ollama for persona %s message %s contained only <think> content",
+                task.persona_snapshot.name,
+                task.message_id,
+            )
+            return False
+        duration_ms = int((time.time() - start_ts) * 1000)
+        limit = task.persona_snapshot.max_message_chars or self.config.max_message_chars or 200
+        if limit <= 0:
+            limit = 200
+        chunks = self._chunk_response(response_text, limit)
+        if not chunks:
+            self._logger.warning(
+                "Response from Ollama for persona %s message %s produced no chunks",
+                task.persona_snapshot.name,
+                task.message_id,
+            )
+            return False
+        reply_meta: Dict[str, Any] = {
+            "reply_type": "llm",
+            "model": model,
+            "trigger": task.trigger,
+            "source_message_id": task.message_id,
+            "duration_ms": duration_ms,
+        }
+        if task.persona_snapshot.temperature is not None:
+            reply_meta["temperature"] = task.persona_snapshot.temperature
+        rows = self._csv.read_rows(task.thread_path)
+        found = False
+        for row in rows:
+            if row.get("message_id") == task.message_id:
+                row["processed"] = "1"
+                found = True
+                break
+        if not found:
+            self._logger.warning(
+                "Source message %s not found in %s during reply write",
+                task.message_id,
+                task.thread_path,
+            )
+        with self._persona_lock:
+            now = dt.datetime.now(dt.timezone.utc)
+            persona = self.personas.get_by_name(task.persona_snapshot.name)
+            if persona is None:
+                self._logger.warning(
+                    "Persona %s disappeared before reply write",
+                    task.persona_snapshot.name,
+                )
+                return False
+            persona.refresh_today(now)
+            persona.runtime.total_calls += 1
+            persona.runtime.today_calls += 1
+        match = PersonaMatch(persona=persona, trigger=task.trigger, command=None, remainder=task.prompt_text)
+        total_chunks = len(chunks)
+        for idx, chunk_text in enumerate(chunks, start=1):
+            chunk_meta = {**reply_meta, "chunk_index": idx, "chunk_total": total_chunks}
+            rows.append(
+                self._build_reply_row(
+                    task.thread_path,
+                    task.source_row,
+                    task.message_id,
+                    persona,
+                    match,
+                    (chunk_text, chunk_meta),
+                    task.source_meta,
+                )
+            )
+        self._csv.write_rows(task.thread_path, THREAD_HEADERS, rows)
+        with self._persona_lock:
+            persona.write_runtime()
+        self._logger.info(
+            "Prepared LLM reply for persona=%s thread=%s message=%s",
+            task.persona_snapshot.name,
+            task.thread_key,
+            task.message_id,
+        )
+        return True
 
     def _message_id(self, path: Path, row: Dict[str, str], idx: int) -> str:
         message_id = row.get("message_id") or ""
@@ -726,6 +1159,15 @@ class AIAgent:
                 return True
         return False
 
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _detect_persona(self, row: Dict[str, str], fallback_thread_type: str) -> Optional[PersonaMatch]:
         """Detect which persona, if any, should respond to a message."""
         content = (row.get("content") or "").strip()
@@ -735,7 +1177,8 @@ class AIAgent:
         if not tokens:
             return None
         first = tokens[0]
-        persona = self.personas.find_by_trigger(first)
+        with self._persona_lock:
+            persona = self.personas.find_by_trigger(first)
         if persona is None:
             if (row.get("thread_type") or fallback_thread_type) == "dm":
                 # Default persona reserved for non-control replies; not handled yet.

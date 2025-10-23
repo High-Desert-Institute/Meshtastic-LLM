@@ -1115,8 +1115,19 @@ class StubSerialInterface:
     def close(self) -> None:
         self._listener = None
 
-    def sendText(self, content: str, dest: Optional[str] = None, channelIndex: Optional[int] = None) -> None:
-        self.sent_messages.append({"content": content, "dest": dest, "channelIndex": channelIndex})
+    def sendText(
+        self,
+        content: str,
+        dest: Optional[str] = None,
+        channelIndex: Optional[int] = None,
+        replyId: Optional[int] = None,
+    ) -> None:
+        self.sent_messages.append({
+            "content": content,
+            "dest": dest,
+            "channelIndex": channelIndex,
+            "replyId": replyId,
+        })
 
     # Test helper
     def feed(self, packet: Dict[str, Any]) -> None:
@@ -1284,11 +1295,14 @@ def main() -> None:
         config.data_root = Path(temp_dir)
         config.nodes_base = config.data_root / "nodes"
         config.test_mode = True
-        interface_factory = StubSerialInterface
+        stub_interface = StubSerialInterface()
         cli_arg_dict = vars(args)
-        bridge = MeshtasticBridge(config=config, interface_factory=interface_factory, cli_args=cli_arg_dict)
-        assert isinstance(bridge._interface, StubSerialInterface)
-        run_test_mode(bridge, bridge._interface)
+
+        def _factory() -> StubSerialInterface:
+            return stub_interface
+
+        bridge = MeshtasticBridge(config=config, interface_factory=_factory, cli_args=cli_arg_dict)
+        run_test_mode(bridge, stub_interface)
         return
 
     ports_to_run: List[Optional[str]] = []

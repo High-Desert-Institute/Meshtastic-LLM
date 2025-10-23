@@ -18,9 +18,9 @@ enable_prompt_logs = true
 ignore_channel_indexes = [0]
 
 [ollama]
-base_url = "http://localhost:11434"
-model_instruct = "qwen3-4b-q8-instruct"
-model_think = "qwen3-4b-q8-thinking"
+base_url = "http://docker-ai0:11434"
+model_instruct = "qwen3:4b-instruct-2507-q8_0"
+model_think = "qwen3:4b-thinking-2507-q8_0"
 
 [general]
 node_uid_strategy = "auto"
