@@ -18,7 +18,7 @@ enable_prompt_logs = true
 ignore_channel_indexes = [0]
 
 [ollama]
-base_url = "http://meshtastic-llm:11434"
+base_url = "http://meshtasticllm:11434"
 model_instruct = "qwen3:4b-instruct-2507-q8_0"
 model_think = "qwen3:4b-thinking-2507-q8_0"
 

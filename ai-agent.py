@@ -1427,7 +1427,6 @@ class AIAgent:
         base_prefix = f"from {persona.name}:"
         prefix = base_prefix if chunk_total <= 1 else f"{base_prefix} ({chunk_index}/{chunk_total})"
         content = f"{prefix} {content}" if content else prefix
-
         row: Dict[str, str] = {
             "processed": "0",
             "thread_type": thread_type,
