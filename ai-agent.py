@@ -1424,10 +1424,9 @@ class AIAgent:
 
         chunk_total = int(final_meta.get("chunk_total", final_meta.get("chunk_count", 1)) or 1)
         chunk_index = int(final_meta.get("chunk_index", 1) or 1)
-        prefix = persona.name
-        if chunk_total > 1:
-            prefix = f"{persona.name} ({chunk_index}/{chunk_total})"
-        content = f"{prefix}: {content}" if content else f"{prefix}:"
+        base_prefix = f"from {persona.name}:"
+        prefix = base_prefix if chunk_total <= 1 else f"{base_prefix} ({chunk_index}/{chunk_total})"
+        content = f"{prefix} {content}" if content else prefix
 
         row: Dict[str, str] = {
             "processed": "0",
