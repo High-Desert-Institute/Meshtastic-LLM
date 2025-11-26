@@ -6,10 +6,12 @@ guilds:
     - pathfinders
 link: "https://github.com/High-Desert-Institute/Meshtastic-LLM"
 summary: >-
-    A tool for conneting local LLMs to the Meshtastic network.
+    A tool for connecting local LLMs to the Meshtastic network.
 ---
 
 # Meshtastic-LLM
+
+*This Pathfinders' Guild project keeps long-range navigation data available even when the wider internet is down.*
 
 ## Styleguide References
 - `project-spec.md` – full technical specification plus CLI logging and CLI-first Python style requirements. granular task tracking with status legend per the styleguide, and organizational context, partnerships, and impact narrative.
