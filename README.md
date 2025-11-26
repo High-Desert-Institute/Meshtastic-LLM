@@ -1,3 +1,14 @@
+---
+layout: project
+title: "Meshtastic-LLM"
+slug: meshtastic-llm
+guilds:
+    - pathfinders
+link: "https://github.com/High-Desert-Institute/Meshtastic-LLM"
+summary: >-
+    A tool for conneting local LLMs to the Meshtastic network.
+---
+
 # Meshtastic-LLM
 
 ## Styleguide References
